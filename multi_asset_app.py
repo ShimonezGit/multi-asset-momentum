@@ -14,7 +14,6 @@ def load_equity_curve(name: str) -> pd.DataFrame:
     if not os.path.exists(path):
         return pd.DataFrame()
     df = pd.read_csv(path)
-    # מצפה לעמודה 'date' או אינדקס ראשון כ-date
     if "date" in df.columns:
         df["date"] = pd.to_datetime(df["date"])
         df.set_index("date", inplace=True)
@@ -39,7 +38,6 @@ def main():
     )
 
     st.title("Multi-Asset Momentum – Crypto / US / IL")
-
     st.caption("דשבורד מבוסס תוצאות Backtest 2022–2025. אין כאן מסחר אמיתי, רק סימולציה.")
 
     # טעינת נתונים
@@ -53,10 +51,16 @@ def main():
         return
 
     if summary_df.empty:
-        st.warning("לא נמצא multi_summary.csv – סיכום לא יוצג.")
+        st.warning("לא נמצא multi_summary.csv – סיכום מדדים יהיה חלקי.")
 
-    # ===== כרטיסי מדדים =====
-    st.subheader("סיכום ביצועים")
+    # ===== בחירת שווקים (מסננים) =====
+    st.sidebar.header("בחירת שווקים")
+    show_crypto = st.sidebar.checkbox("קריפטו", value=not crypto_eq.empty)
+    show_us = st.sidebar.checkbox("מניות ארה\"ב", value=not us_eq.empty)
+    show_il = st.sidebar.checkbox("מניות ישראל", value=not il_eq.empty)
+
+    # ===== כרטיסי מדדים למשקיעים =====
+    st.subheader("סיכום ביצועים – Strategy מול Benchmark")
 
     col_crypto, col_us, col_il = st.columns(3)
 
@@ -69,49 +73,81 @@ def main():
             col.metric(label, "N/A")
             return
         r = row.iloc[0]
-        col.metric(
-            label,
-            f"{r['total_return_pct']:.1f}% ({r['multiple']:.2f}x)",
-            help=f"MaxDD: {r['max_drawdown_pct']:.1f}% | Win%: {r['win_rate_pct']:.1f}% | Benchmark: {r['benchmark_return_pct']:.1f}% ({r['benchmark_multiple']:.2f}x)"
-        )
+        value = f"{r['total_return_pct']:.1f}% ({r['multiple']:.2f}x)"
+        delta = f"CAGR {r['cagr_pct']:.1f}% | Sharpe {r['sharpe']:.2f} | Calmar {r['calmar']:.2f}"
+        col.metric(label, value, delta=delta)
 
-    metric_block(col_crypto, "קריפטו – אלטים", "CRYPTO")
-    metric_block(col_us, "מניות ארה\"ב", "US")
-    metric_block(col_il, "מניות ישראל", "IL")
+    if show_crypto:
+        metric_block(col_crypto, "קריפטו – אלטים", "CRYPTO")
+    if show_us:
+        metric_block(col_us, "מניות ארה\"ב", "US")
+    if show_il:
+        metric_block(col_il, "מניות ישראל", "IL")
 
-    # ===== גרף עקומת הון =====
-    st.subheader("עקומות הון – Crypto / US / IL")
+    # ===== גרף עקומות הון – Strategy + Benchmark =====
+    st.subheader("עקומות הון – Strategy מול Benchmark")
 
     equity_chart_df = pd.DataFrame()
 
-    if not crypto_eq.empty:
-        equity_chart_df["Crypto"] = crypto_eq["equity"]
-    if not us_eq.empty:
-        # ניישר לפי תאריך קיים
-        us_series = us_eq["equity"].reindex(equity_chart_df.index) if not equity_chart_df.empty else us_eq["equity"]
-        equity_chart_df["US"] = us_series
-    if not il_eq.empty:
-        il_series = il_eq["equity"].reindex(equity_chart_df.index) if not equity_chart_df.empty else il_eq["equity"]
-        equity_chart_df["IL"] = il_series
+    if show_crypto and not crypto_eq.empty:
+        equity_chart_df["Crypto Strategy"] = crypto_eq["equity"]
+        if "benchmark_equity" in crypto_eq.columns:
+            equity_chart_df["Crypto Benchmark"] = crypto_eq["benchmark_equity"]
+
+    if show_us and not us_eq.empty:
+        if equity_chart_df.empty:
+            equity_chart_df["US Strategy"] = us_eq["equity"]
+            if "benchmark_equity" in us_eq.columns:
+                equity_chart_df["US Benchmark"] = us_eq["benchmark_equity"]
+        else:
+            equity_chart_df["US Strategy"] = us_eq["equity"].reindex(equity_chart_df.index)
+            if "benchmark_equity" in us_eq.columns:
+                equity_chart_df["US Benchmark"] = us_eq["benchmark_equity"].reindex(equity_chart_df.index)
+
+    if show_il and not il_eq.empty:
+        if equity_chart_df.empty:
+            equity_chart_df["IL Strategy"] = il_eq["equity"]
+            if "benchmark_equity" in il_eq.columns:
+                equity_chart_df["IL Benchmark"] = il_eq["benchmark_equity"]
+        else:
+            equity_chart_df["IL Strategy"] = il_eq["equity"].reindex(equity_chart_df.index)
+            if "benchmark_equity" in il_eq.columns:
+                equity_chart_df["IL Benchmark"] = il_eq["benchmark_equity"].reindex(equity_chart_df.index)
 
     if equity_chart_df.empty:
-        st.warning("אין עקומות הון להצגה.")
+        st.warning("לא נבחרו שווקים להצגה.")
     else:
         equity_chart_df = equity_chart_df.ffill()
         st.line_chart(equity_chart_df)
 
-    # ===== טבלת סיכום =====
-    st.subheader("טבלת סיכום לשווקים")
+    # ===== טבלת מדדים מלאה =====
+    st.subheader("טבלת מדדים למשקיעים")
 
     if not summary_df.empty:
-        st.dataframe(summary_df.style.format({
-            "total_return_pct": "{:.2f}",
-            "multiple": "{:.2f}",
-            "max_drawdown_pct": "{:.2f}",
-            "win_rate_pct": "{:.2f}",
-            "benchmark_return_pct": "{:.2f}",
-            "benchmark_multiple": "{:.2f}",
-        }))
+        markets_to_show = []
+        if show_crypto:
+            markets_to_show.append("CRYPTO")
+        if show_us:
+            markets_to_show.append("US")
+        if show_il:
+            markets_to_show.append("IL")
+
+        if markets_to_show:
+            filtered = summary_df[summary_df["market"].isin(markets_to_show)].copy()
+            st.dataframe(filtered.style.format({
+                "total_return_pct": "{:.2f}",
+                "multiple": "{:.2f}",
+                "cagr_pct": "{:.2f}",
+                "sharpe": "{:.2f}",
+                "calmar": "{:.2f}",
+                "max_drawdown_pct": "{:.2f}",
+                "win_rate_pct": "{:.2f}",
+                "benchmark_return_pct": "{:.2f}",
+                "benchmark_multiple": "{:.2f}",
+                "benchmark_cagr_pct": "{:.2f}",
+            }))
+        else:
+            st.write("לא נבחרו שווקים להצגה בטבלה.")
     else:
         st.write("אין סיכום זמין.")
 
@@ -123,7 +159,7 @@ def main():
     if not crypto_eq.empty:
         crypto_csv = crypto_eq.to_csv().encode("utf-8")
         col1.download_button(
-            "הורד Crypto Equity (CSV)",
+            "הורד Crypto (Strategy+Benchmark)",
             data=crypto_csv,
             file_name="crypto_equity_curve.csv",
             mime="text/csv"
@@ -132,7 +168,7 @@ def main():
     if not us_eq.empty:
         us_csv = us_eq.to_csv().encode("utf-8")
         col2.download_button(
-            "הורד US Equity (CSV)",
+            "הורד US (Strategy+Benchmark)",
             data=us_csv,
             file_name="us_equity_curve.csv",
             mime="text/csv"
@@ -141,7 +177,7 @@ def main():
     if not il_eq.empty:
         il_csv = il_eq.to_csv().encode("utf-8")
         col3.download_button(
-            "הורד IL Equity (CSV)",
+            "הורד IL (Strategy+Benchmark)",
             data=il_csv,
             file_name="il_equity_curve.csv",
             mime="text/csv"
@@ -156,7 +192,7 @@ def main():
             mime="text/csv"
         )
 
-    st.caption("האפליקציה מציגה תוצאות Backtest בלבד. כדי לעדכן את הנתונים, הרץ שוב את multi_asset_momentum_backtest.py ולאחר מכן רענן את הדף.")
+    st.caption("האפליקציה מציגה תוצאות Backtest בלבד. כדי לעדכן את הנתונים, הרץ שוב את multi_asset_momentum_backtest.py ולאחר מכן דחוף ל-GitHub ותרענן את האפליקציה.")
 
 
 if __name__ == "__main__":
