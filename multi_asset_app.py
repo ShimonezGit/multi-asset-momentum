@@ -1,352 +1,297 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+"""
+multi_asset_app.py
+דשבורד רב-נכסי לניתוח ביצועי אסטרטגיות קריפטו / ארה"ב / ישראל
+מתאים ל-Streamlit Cloud כאפליקציה חיה.
+"""
 
 import os
+import sys
+from datetime import datetime, date
+from typing import Dict, Tuple, Optional
 
-import numpy as np
 import pandas as pd
-import streamlit as st  # pip install streamlit pandas
+import numpy as np
+import streamlit as st
+
+# =========================
+# קונפיגורציה בסיסית
+# =========================
 
 RESULTS_DIR = "results_multi"
 
+CRYPTO_FILE = os.path.join(RESULTS_DIR, "crypto_equity_curve.csv")
+US_FILE = os.path.join(RESULTS_DIR, "us_equity_curve.csv")
+IL_FILE = os.path.join(RESULTS_DIR, "il_equity_curve.csv")
+SUMMARY_FILE = os.path.join(RESULTS_DIR, "multi_summary.csv")
 
-def load_equity_curve(name: str) -> pd.DataFrame:
-    path = os.path.join(RESULTS_DIR, f"{name}_equity_curve.csv")
+DATE_COL_CANDIDATES = ["date", "datetime", "time", "timestamp"]
+
+# =========================
+# פונקציות עזר לדאטה
+# =========================
+
+def load_csv_with_date(path: str) -> Optional[pd.DataFrame]:
+    """טוען CSV ומנסה לזהות עמודת תאריך, מחזיר DataFrame או None אם יש בעיה."""
     if not os.path.exists(path):
-        return pd.DataFrame()
-    df = pd.read_csv(path)
-    if "date" in df.columns:
-        df["date"] = pd.to_datetime(df["date"])
-        df.set_index("date", inplace=True)
-    else:
-        df.iloc[:, 0] = pd.to_datetime(df.iloc[:, 0])
-        df.set_index(df.columns[0], inplace=True)
+        return None
+
+    try:
+        df = pd.read_csv(path)
+    except Exception as e:
+        st.error(f"שגיאה בטעינת הקובץ: {path} - {e}")
+        return None
+
+    # ניסיון לזהות עמודת תאריך
+    date_col = None
+    for cand in DATE_COL_CANDIDATES:
+        if cand in df.columns:
+            date_col = cand
+            break
+
+    if date_col is None:
+        # אם אין עמודת תאריך – נסה ליצור אינדקס תאריכים מלאכותי
+        if "index" in df.columns:
+            df["date"] = pd.to_datetime(df["index"])
+            date_col = "date"
+        else:
+            # fallback: אין תאריך – לא מסונן לפי תאריך, נמשיך בכל זאת
+            return df
+
+    df[date_col] = pd.to_datetime(df[date_col])
+    df = df.sort_values(by=date_col).reset_index(drop=True)
+    df = df.rename(columns={date_col: "date"})
     return df
 
 
-def load_summary() -> pd.DataFrame:
-    path = os.path.join(RESULTS_DIR, "multi_summary.csv")
-    if not os.path.exists(path):
-        return pd.DataFrame()
-    df = pd.read_csv(path)
-    return df
+def filter_by_date_range(df: pd.DataFrame, start: date, end: date) -> pd.DataFrame:
+    """מסנן DataFrame לטווח תאריכים לפי עמודת 'date'."""
+    if "date" not in df.columns:
+        return df
+
+    mask = (df["date"].dt.date >= start) & (df["date"].dt.date <= end)
+    filtered = df.loc[mask].copy()
+    return filtered
 
 
-def compute_window_metrics(equity: pd.Series, benchmark_close: pd.Series | None = None) -> dict:
-    """חישוב מדדים על חלון זמן נתון (equity כבר מסונן לתקופה)."""
+def compute_window_metrics(equity_df: pd.DataFrame) -> Dict[str, float]:
+    """
+    מחשב מדדים בסיסיים לטווח נבחר:
+    - תשואה כוללת
+    - מכפיל על ההון (PnL factor)
+    - ירידת שיא מקסימלית
+    """
     metrics = {
         "total_return_pct": np.nan,
-        "multiple": np.nan,
-        "max_dd_pct": np.nan,
-        "benchmark_return_pct": np.nan,
-        "benchmark_multiple": np.nan,
+        "pnl_factor": np.nan,
+        "max_drawdown_pct": np.nan,
     }
-    if equity is None or equity.empty:
+
+    if equity_df is None or equity_df.empty:
         return metrics
 
-    eq = equity.dropna()
-    if eq.empty:
+    if "equity" not in equity_df.columns:
+        # אין עמודת equity – אין מה לחשב
+        return metrics
+
+    eq = equity_df["equity"].astype(float)
+    if len(eq) < 2:
         return metrics
 
     start_val = eq.iloc[0]
     end_val = eq.iloc[-1]
-    metrics["multiple"] = float(end_val / start_val)
-    metrics["total_return_pct"] = float((end_val / start_val - 1.0) * 100.0)
+    if start_val <= 0:
+        return metrics
 
-    roll_max = eq.cummax()
-    dd = (eq - roll_max) / roll_max
-    metrics["max_dd_pct"] = float(dd.min() * 100.0)
+    total_return = (end_val / start_val - 1.0) * 100.0
+    pnl_factor = end_val / start_val
 
-    if benchmark_close is not None and not benchmark_close.empty:
-        b = benchmark_close.dropna()
-        if not b.empty:
-            b_start = b.iloc[0]
-            b_end = b.iloc[-1]
-            metrics["benchmark_multiple"] = float(b_end / b_start)
-            metrics["benchmark_return_pct"] = float((b_end / b_start - 1.0) * 100.0)
+    # חישוב Max Drawdown
+    cum_max = eq.cummax()
+    drawdown = (eq / cum_max - 1.0) * 100.0
+    max_dd = drawdown.min()
 
+    metrics["total_return_pct"] = float(total_return)
+    metrics["pnl_factor"] = float(pnl_factor)
+    metrics["max_drawdown_pct"] = float(max_dd)
     return metrics
 
 
-def main():
-    st.set_page_config(
-        page_title="Multi-Asset Momentum Dashboard",
-        layout="wide"
-    )
+def load_summary(path: str) -> Optional[pd.DataFrame]:
+    """טוען summary כללי אם קיים."""
+    if not os.path.exists(path):
+        return None
+    try:
+        df = pd.read_csv(path)
+        return df
+    except Exception as e:
+        st.error(f"שגיאה בטעינת summary: {path} - {e}")
+        return None
 
-    st.title("Multi-Asset Momentum – Crypto / US / IL")
-    st.caption("דשבורד מבוסס תוצאות Backtest 2022–2025. אין כאן מסחר אמיתי, רק סימולציה.")
+# =========================
+# לוגיקת תצוגה – Streamlit
+# =========================
 
-    # טעינת נתונים
-    crypto_eq = load_equity_curve("crypto")
-    us_eq = load_equity_curve("us")
-    il_eq = load_equity_curve("il")
-    summary_df = load_summary()
+def render_segment_block(
+    name: str,
+    df: Optional[pd.DataFrame],
+    start_date: date,
+    end_date: date,
+) -> None:
+    """מציג בלוק עבור סגמנט אחד (קריפטו / ארה\"ב / ישראל)."""
+    st.subheader(f"{name}")
 
-    if crypto_eq.empty and us_eq.empty and il_eq.empty:
-        st.error("לא נמצאו קבצי עקומת הון ב-results_multi. ודא שהרצת את multi_asset_momentum_backtest.py קודם.")
+    if df is None or df.empty:
+        st.warning(f"אין דאטה זמין ל-{name}.")
         return
 
-<<<<<<< HEAD
-    # טווח תאריכים מלא
-    all_dates = pd.Index([])
-    for df in [crypto_eq, us_eq, il_eq]:
-        if not df.empty:
-            all_dates = all_dates.union(df.index)
-    all_dates = all_dates.sort_values()
-    min_date = all_dates.min()
-    max_date = all_dates.max()
+    # פילטר לטווח התאריכים שנבחר
+    filtered = filter_by_date_range(df, start_date, end_date)
+    if filtered.empty:
+        st.warning("אין נתונים בטווח התאריכים שנבחר.")
+        return
 
-    # ===== Sidebar – שווקים + טווח זמן =====
+    # Equity curve
+    if "equity" in filtered.columns:
+        st.line_chart(
+            filtered.set_index("date")["equity"],
+            height=250,
+        )
+    else:
+        st.warning("לא נמצאה עמודת 'equity' – לא ניתן להציג עקומת הון.")
+
+    # מדדים לטווח
+    metrics = compute_window_metrics(filtered)
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric(
+            label="תשואה כוללת בטווח (%)",
+            value=f"{metrics['total_return_pct']:.1f}" if not np.isnan(metrics["total_return_pct"]) else "N/A",
+        )
+    with col2:
+        st.metric(
+            label="PnL Factor",
+            value=f"{metrics['pnl_factor']:.2f}" if not np.isnan(metrics["pnl_factor"]) else "N/A",
+        )
+    with col3:
+        st.metric(
+            label="Max Drawdown (%)",
+            value=f"{metrics['max_drawdown_pct']:.1f}" if not np.isnan(metrics["max_drawdown_pct"]) else "N/A",
+        )
+
+
+def main() -> None:
+    st.set_page_config(
+        page_title="Multi-Asset Strategy Dashboard",
+        layout="wide",
+    )
+
+    st.title("Multi-Asset Strategy Dashboard")
+    st.caption("קריפטו / שוק אמריקאי / שוק ישראלי – מבוסס תוצאות קיימות")
+
+    # ================
+    # טעינת דאטה
+    # ================
+    crypto_df = load_csv_with_date(CRYPTO_FILE)
+    us_df = load_csv_with_date(US_FILE)
+    il_df = load_csv_with_date(IL_FILE)
+    summary_df = load_summary(SUMMARY_FILE)
+
+    # טווח תאריכים גלובלי מתוך כל הדאטה הזמינה
+    all_dates = []
+    for df in [crypto_df, us_df, il_df]:
+        if df is not None and not df.empty and "date" in df.columns:
+            all_dates.append(df["date"])
+
+    if all_dates:
+        global_min = min(s.min() for s in all_dates).date()
+        global_max = max(s.max() for s in all_dates).date()
+    else:
+        # ברירת מחדל אם אין דאטה – טווח של השנה האחרונה
+        global_max = date.today()
+        global_min = date(global_max.year - 1, global_max.month, global_max.day)
+
+    # ================
+    # סיידבר – מסננים
+    # ================
     st.sidebar.header("מסננים")
 
-=======
-    if summary_df.empty:
-        st.warning("לא נמצא multi_summary.csv – סיכום מדדים יהיה חלקי.")
-
-    # ===== בחירת שווקים (מסננים) =====
-    st.sidebar.header("בחירת שווקים")
->>>>>>> e7a25d9b8db9e9b8bdbbb6355a7eb3a0a60f81f6
-    show_crypto = st.sidebar.checkbox("קריפטו", value=not crypto_eq.empty)
-    show_us = st.sidebar.checkbox("מניות ארה\"ב", value=not us_eq.empty)
-    show_il = st.sidebar.checkbox("מניות ישראל", value=not il_eq.empty)
-
-<<<<<<< HEAD
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("טווח זמן")
-
-    start_default = min_date.to_pydatetime().date() if pd.notna(min_date) else None
-    end_default = max_date.to_pydatetime().date() if pd.notna(max_date) else None
-
-    date_range = st.sidebar.date_input(
-        "בחר טווח תאריכים",
-        value=(start_default, end_default),
-        min_value=start_default,
-        max_value=end_default
+    selected_segments = st.sidebar.multiselect(
+        "בחר סגמנטים להצגה:",
+        options=["קריפטו", "ארה\"ב", "ישראל"],
+        default=["קריפטו", "ארה\"ב", "ישראל"],
     )
 
-    if isinstance(date_range, tuple):
-        start_date, end_date = date_range
+    start_date, end_date = st.sidebar.date_input(
+        "בחר טווח תאריכים:",
+        value=(global_min, global_max),
+        min_value=global_min,
+        max_value=global_max,
+    )
+
+    if isinstance(start_date, (list, tuple)):
+        # למקרה ש-Streamlit מחזיר tuple
+        start_date, end_date = start_date
+
+    if start_date > end_date:
+        st.sidebar.error("תאריך ההתחלה גדול מתאריך הסיום. תקן את הטווח.")
+        st.stop()
+
+    st.sidebar.markdown("---")
+    st.sidebar.write(f"**טווח גלובלי בדאטה:** {global_min} עד {global_max}")
+    st.sidebar.write(f"**טווח נבחר:** {start_date} עד {end_date}")
+
+    # ================
+    # summary כללי
+    # ================
+    st.markdown("### סיכום כללי לפי סגמנט")
+
+    if summary_df is not None and not summary_df.empty:
+        # מנסה לנרמל שמות עמודות
+        cols_map = {}
+        for col in summary_df.columns:
+            low = col.lower()
+            if "segment" in low or "market" in low or "asset" in low:
+                cols_map[col] = "segment"
+            elif "total_return" in low or "return_pct" in low:
+                cols_map[col] = "total_return"
+            elif "pnl_factor" in low or "multiplier" in low or "multiple" in low:
+                cols_map[col] = "pnl_factor"
+            elif "drawdown" in low:
+                cols_map[col] = "max_drawdown"
+            elif "win_rate" in low or "winrate" in low:
+                cols_map[col] = "win_rate"
+
+        summary = summary_df.rename(columns=cols_map).copy()
+
+        # טיפול בעמודות כפולות – שמירה על עמודה אחת מכל שם
+        summary = summary.loc[:, ~summary.columns.duplicated()]
+
+        display_cols = []
+        for c in ["segment", "total_return", "pnl_factor", "max_drawdown", "win_rate"]:
+            if c in summary.columns:
+                display_cols.append(c)
+
+        if display_cols:
+            st.dataframe(summary[display_cols])
+        else:
+            st.info("לא נמצאו עמודות מוכרות ל-summary, מציג טבלה מלאה:")
+            st.dataframe(summary)
     else:
-        start_date = date_range
-        end_date = end_default
+        st.info("לא נמצא קובץ multi_summary.csv או שהוא ריק.")
 
-    if start_date is None or end_date is None:
-        st.error("טווח תאריכים לא תקין.")
-        return
+    st.markdown("---")
 
-    start_ts = pd.to_datetime(start_date)
-    end_ts = pd.to_datetime(end_date)
+    # ================
+    # תצוגה לפי סגמנט
+    # ================
+    if "קריפטו" in selected_segments:
+        render_segment_block("קריפטו (Crypto)", crypto_df, start_date, end_date)
 
-    # סינון עקומות הון לפי טווח
-    def filter_df(df: pd.DataFrame) -> pd.DataFrame:
-        if df.empty:
-            return df
-        return df[(df.index >= start_ts) & (df.index <= end_ts)]
+    if "ארה\"ב" in selected_segments:
+        render_segment_block("שוק אמריקאי (US)", us_df, start_date, end_date)
 
-    crypto_eq_f = filter_df(crypto_eq)
-    us_eq_f = filter_df(us_eq)
-    il_eq_f = filter_df(il_eq)
-
-    # ===== כרטיסי מדדים – מחושבים לפי טווח =====
-    st.subheader("סיכום ביצועים על הטווח הנבחר")
-=======
-    # ===== כרטיסי מדדים למשקיעים =====
-    st.subheader("סיכום ביצועים – Strategy מול Benchmark")
->>>>>>> e7a25d9b8db9e9b8bdbbb6355a7eb3a0a60f81f6
-
-    col_crypto, col_us, col_il = st.columns(3)
-
-    def card_for_market(col, label, market_name, eq_df: pd.DataFrame):
-        if eq_df.empty:
-            col.metric(label, "N/A")
-            return
-<<<<<<< HEAD
-
-        # מוצא נתוני בנצ'מרק מה-summary אם יש
-        bench_return = np.nan
-        bench_mult = np.nan
-        if not summary_df.empty:
-            row = summary_df[summary_df["market"] == market_name]
-            if not row.empty:
-                r = row.iloc[0]
-                bench_return = r.get("benchmark_return_pct", np.nan)
-                bench_mult = r.get("benchmark_multiple", np.nan)
-
-        metrics = compute_window_metrics(eq_df["equity"])
-
-        value = f"{metrics['total_return_pct']:.1f}% ({metrics['multiple']:.2f}x)"
-        if not np.isnan(bench_return):
-            delta = f"Benchmark {bench_return:.1f}% ({bench_mult:.2f}x)"
-        else:
-            delta = None
-        col.metric(label, value, delta=delta)
-
-    if show_crypto:
-        card_for_market(col_crypto, "קריפטו – אלטים", "CRYPTO", crypto_eq_f)
-    if show_us:
-        card_for_market(col_us, "מניות ארה\"ב", "US", us_eq_f)
-    if show_il:
-        card_for_market(col_il, "מניות ישראל", "IL", il_eq_f)
-
-    # ===== גרף עקומות הון – Strategy בלבד כרגע =====
-    st.subheader("עקומות הון – Strategy (טווח מסונן)")
-
-    equity_chart_df = pd.DataFrame()
-
-    if show_crypto and not crypto_eq_f.empty:
-        equity_chart_df["Crypto Strategy"] = crypto_eq_f["equity"]
-
-    if show_us and not us_eq_f.empty:
-        if equity_chart_df.empty:
-            equity_chart_df["US Strategy"] = us_eq_f["equity"]
-        else:
-            equity_chart_df["US Strategy"] = us_eq_f["equity"].reindex(equity_chart_df.index)
-
-    if show_il and not il_eq_f.empty:
-        if equity_chart_df.empty:
-            equity_chart_df["IL Strategy"] = il_eq_f["equity"]
-        else:
-            equity_chart_df["IL Strategy"] = il_eq_f["equity"].reindex(equity_chart_df.index)
-=======
-        row = summary_df[summary_df["market"] == market_name]
-        if row.empty:
-            col.metric(label, "N/A")
-            return
-        r = row.iloc[0]
-        value = f"{r['total_return_pct']:.1f}% ({r['multiple']:.2f}x)"
-        delta = f"CAGR {r['cagr_pct']:.1f}% | Sharpe {r['sharpe']:.2f} | Calmar {r['calmar']:.2f}"
-        col.metric(label, value, delta=delta)
-
-    if show_crypto:
-        metric_block(col_crypto, "קריפטו – אלטים", "CRYPTO")
-    if show_us:
-        metric_block(col_us, "מניות ארה\"ב", "US")
-    if show_il:
-        metric_block(col_il, "מניות ישראל", "IL")
-
-    # ===== גרף עקומות הון – Strategy + Benchmark =====
-    st.subheader("עקומות הון – Strategy מול Benchmark")
-
-    equity_chart_df = pd.DataFrame()
-
-    if show_crypto and not crypto_eq.empty:
-        equity_chart_df["Crypto Strategy"] = crypto_eq["equity"]
-        if "benchmark_equity" in crypto_eq.columns:
-            equity_chart_df["Crypto Benchmark"] = crypto_eq["benchmark_equity"]
-
-    if show_us and not us_eq.empty:
-        if equity_chart_df.empty:
-            equity_chart_df["US Strategy"] = us_eq["equity"]
-            if "benchmark_equity" in us_eq.columns:
-                equity_chart_df["US Benchmark"] = us_eq["benchmark_equity"]
-        else:
-            equity_chart_df["US Strategy"] = us_eq["equity"].reindex(equity_chart_df.index)
-            if "benchmark_equity" in us_eq.columns:
-                equity_chart_df["US Benchmark"] = us_eq["benchmark_equity"].reindex(equity_chart_df.index)
-
-    if show_il and not il_eq.empty:
-        if equity_chart_df.empty:
-            equity_chart_df["IL Strategy"] = il_eq["equity"]
-            if "benchmark_equity" in il_eq.columns:
-                equity_chart_df["IL Benchmark"] = il_eq["benchmark_equity"]
-        else:
-            equity_chart_df["IL Strategy"] = il_eq["equity"].reindex(equity_chart_df.index)
-            if "benchmark_equity" in il_eq.columns:
-                equity_chart_df["IL Benchmark"] = il_eq["benchmark_equity"].reindex(equity_chart_df.index)
->>>>>>> e7a25d9b8db9e9b8bdbbb6355a7eb3a0a60f81f6
-
-    if equity_chart_df.empty:
-        st.warning("לא נבחרו שווקים להצגה.")
-    else:
-        equity_chart_df = equity_chart_df.ffill()
-        st.line_chart(equity_chart_df)
-
-<<<<<<< HEAD
-    # ===== טבלת מדדים – סטטית מה-summary, אבל מסוננת לפי שווקים =====
-    st.subheader("טבלת מדדים (על התקופה המלאה)")
-=======
-    # ===== טבלת מדדים מלאה =====
-    st.subheader("טבלת מדדים למשקיעים")
->>>>>>> e7a25d9b8db9e9b8bdbbb6355a7eb3a0a60f81f6
-
-    if not summary_df.empty:
-        markets_to_show = []
-        if show_crypto:
-            markets_to_show.append("CRYPTO")
-        if show_us:
-            markets_to_show.append("US")
-        if show_il:
-            markets_to_show.append("IL")
-
-        if markets_to_show:
-            filtered = summary_df[summary_df["market"].isin(markets_to_show)].copy()
-            st.dataframe(filtered.style.format({
-                "total_return_pct": "{:.2f}",
-                "multiple": "{:.2f}",
-<<<<<<< HEAD
-=======
-                "cagr_pct": "{:.2f}",
-                "sharpe": "{:.2f}",
-                "calmar": "{:.2f}",
->>>>>>> e7a25d9b8db9e9b8bdbbb6355a7eb3a0a60f81f6
-                "max_drawdown_pct": "{:.2f}",
-                "win_rate_pct": "{:.2f}",
-                "benchmark_return_pct": "{:.2f}",
-                "benchmark_multiple": "{:.2f}",
-<<<<<<< HEAD
-=======
-                "benchmark_cagr_pct": "{:.2f}",
->>>>>>> e7a25d9b8db9e9b8bdbbb6355a7eb3a0a60f81f6
-            }))
-        else:
-            st.write("לא נבחרו שווקים להצגה בטבלה.")
-    else:
-        st.write("אין סיכום זמין.")
-
-    # ===== הורדת קבצי Backtest =====
-    st.subheader("הורדת קבצי Backtest")
-
-    col1, col2, col3, col4 = st.columns(4)
-
-    if not crypto_eq.empty:
-        crypto_csv = crypto_eq.to_csv().encode("utf-8")
-        col1.download_button(
-            "הורד Crypto (Strategy+Benchmark)",
-            data=crypto_csv,
-            file_name="crypto_equity_curve.csv",
-            mime="text/csv"
-        )
-
-    if not us_eq.empty:
-        us_csv = us_eq.to_csv().encode("utf-8")
-        col2.download_button(
-            "הורד US (Strategy+Benchmark)",
-            data=us_csv,
-            file_name="us_equity_curve.csv",
-            mime="text/csv"
-        )
-
-    if not il_eq.empty:
-        il_csv = il_eq.to_csv().encode("utf-8")
-        col3.download_button(
-            "הורד IL (Strategy+Benchmark)",
-            data=il_csv,
-            file_name="il_equity_curve.csv",
-            mime="text/csv"
-        )
-
-    if not summary_df.empty:
-        summary_csv = summary_df.to_csv(index=False).encode("utf-8")
-        col4.download_button(
-            "הורד Summary (CSV)",
-            data=summary_csv,
-            file_name="multi_summary.csv",
-            mime="text/csv"
-        )
-
-    st.caption("האפליקציה מציגה תוצאות Backtest בלבד. כדי לעדכן את הנתונים, הרץ שוב את multi_asset_momentum_backtest.py ולאחר מכן דחוף ל-GitHub ותרענן את האפליקציה.")
-
-
-if __name__ == "__main__":
-    main()
+    if "ישראל" in selected_segments:
+        render_segment_block("שוק
