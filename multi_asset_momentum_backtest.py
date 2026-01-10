@@ -19,7 +19,8 @@ START_DATE = "2022-01-01"
 END_DATE = "2025-12-31"
 TIMEFRAME_CRYPTO = "1d"
 
-INITIAL_CAPITAL = 10_000.0
+# הון התחלתי – עודכן ל-100,000$
+INITIAL_CAPITAL = 100_000.0
 
 # קריפטו – סל אלטים
 CRYPTO_ALT_SYMBOLS = [
@@ -164,7 +165,7 @@ def fetch_yf_history(tickers: List[str]) -> Dict[str, pd.DataFrame]:
         df.columns = ["open", "high", "low", "close", "volume"]
         df.index.name = "datetime"
         data[ticker] = df
-    return data
+        return data
 
 
 # =========================
@@ -182,7 +183,7 @@ def add_trend_and_momentum(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # =========================
-# מנוע מומנטום כללי
+# Generic Momentum Strategy
 # =========================
 
 class GenericMomentumStrategy:
@@ -190,7 +191,7 @@ class GenericMomentumStrategy:
         self,
         benchmark_df: pd.DataFrame,
         asset_data: Dict[str, pd.DataFrame],
-        market_name: str
+        market_name: str,
     ):
         self.benchmark_df = benchmark_df
         self.asset_data = asset_data
@@ -200,6 +201,7 @@ class GenericMomentumStrategy:
         self.asset_closes = self._build_matrix("close")
         self.asset_mom = self._build_matrix("ret_mom")
         self.asset_exit = self._build_matrix("ret_exit")
+        self.trend_series = self.benchmark_df["trend_up"].reindex(self.calendar).ffill().fillna(False)
 
     def _build_calendar(self) -> pd.DatetimeIndex:
         idx = self.benchmark_df.index
@@ -224,12 +226,10 @@ class GenericMomentumStrategy:
         positions: Dict[str, float] = {sym: 0.0 for sym in self.asset_data.keys()}
         entry_price: Dict[str, float] = {sym: 0.0 for sym in self.asset_data.keys()}
 
-        trend_series = self.benchmark_df["trend_up"].reindex(self.calendar).ffill().fillna(False)
+        for current_dt in self.calendar:
+            prices_today = self.asset_closes.loc[current_dt]
 
-        for current_date in self.calendar:
-            prices_today = self.asset_closes.loc[current_date]
-
-            # יציאה על שבירת מומנטום
+            # יציאות על שבירת מומנטום
             portfolio_value = 0.0
             for sym in list(positions.keys()):
                 qty = positions[sym]
@@ -238,8 +238,7 @@ class GenericMomentumStrategy:
                 price = prices_today.get(sym, np.nan)
                 if np.isnan(price):
                     continue
-
-                ret_exit = self.asset_exit.loc[current_date].get(sym, 0.0)
+                ret_exit = self.asset_exit.loc[current_dt].get(sym, 0.0)
                 if ret_exit <= 0.0:
                     ep = entry_price[sym] if entry_price[sym] > 0 else price
                     value = qty * price
@@ -247,14 +246,14 @@ class GenericMomentumStrategy:
                     pnl_pct = (price / ep - 1.0) if ep > 0 else 0.0
 
                     trades.append(TradeRecord(
-                        date=current_date.date(),
+                        date=current_dt.date(),
                         symbol=sym,
                         side="SELL_EXIT",
                         qty=qty,
                         price=price,
                         value=value,
                         pnl=pnl,
-                        pnl_pct=pnl_pct
+                        pnl_pct=pnl_pct,
                     ))
 
                     cash += value
@@ -263,14 +262,14 @@ class GenericMomentumStrategy:
                 else:
                     portfolio_value += qty * price
 
-            # כניסות/איזון רק אם ה-benchmark בטרנד חיובי
-            if trend_series.loc[current_date]:
-                mom_today = self.asset_mom.loc[current_date]
+            # כניסות/איזון רק אם טרנד חיובי
+            if self.trend_series.loc[current_dt]:
+                mom_today = self.asset_mom.loc[current_dt]
                 candidates = mom_today[mom_today >= MOMENTUM_THRESHOLD].sort_values(ascending=False)
                 selected = list(candidates.index)[:MAX_POSITIONS]
                 desired = set(selected)
 
-                # סגירת מה שלא ב-desired
+                # סגירת נכסים שלא ברשימה
                 for sym in list(positions.keys()):
                     if sym not in desired and positions[sym] > 0:
                         price = prices_today.get(sym, np.nan)
@@ -283,21 +282,21 @@ class GenericMomentumStrategy:
                         pnl_pct = (price / ep - 1.0) if ep > 0 else 0.0
 
                         trades.append(TradeRecord(
-                            date=current_date.date(),
+                            date=current_dt.date(),
                             symbol=sym,
                             side="SELL_TRIM",
                             qty=qty,
                             price=price,
                             value=value,
                             pnl=pnl,
-                            pnl_pct=pnl_pct
+                            pnl_pct=pnl_pct,
                         ))
 
                         cash += value
                         positions[sym] = 0.0
                         entry_price[sym] = 0.0
 
-                # חישוב equity לאחר סגירות
+                # חישוב equity לפני פתיחת פוזיציות חדשות
                 portfolio_value = 0.0
                 for sym in positions.keys():
                     qty = positions[sym]
@@ -307,77 +306,77 @@ class GenericMomentumStrategy:
                     if np.isnan(price):
                         continue
                     portfolio_value += qty * price
-
                 total_equity = cash + portfolio_value
 
                 if len(desired) > 0:
                     capital_per_position = total_equity / len(desired)
+                else:
+                    capital_per_position = 0.0
 
-                    for sym in desired:
-                        price = prices_today.get(sym, np.nan)
-                        if np.isnan(price) or price <= 0:
+                # פתיחה/איזון פוזיציות לנבחרים
+                for sym in desired:
+                    price = prices_today.get(sym, np.nan)
+                    if np.isnan(price) or price <= 0:
+                        continue
+                    target_qty = capital_per_position / price
+                    current_qty = positions.get(sym, 0.0)
+                    delta_qty = target_qty - current_qty
+
+                    if abs(delta_qty) * price < 1.0:
+                        continue
+
+                    if delta_qty > 0:
+                        cost = delta_qty * price
+                        if cost > cash:
                             continue
+                        cash -= cost
+                        new_qty = current_qty + delta_qty
+                        if current_qty == 0:
+                            new_ep = price
+                        else:
+                            old_value = current_qty * entry_price[sym]
+                            new_value = old_value + cost
+                            new_ep = new_value / new_qty
+                        positions[sym] = new_qty
+                        entry_price[sym] = new_ep
 
-                        target_qty = capital_per_position / price
-                        current_qty = positions.get(sym, 0.0)
-                        delta_qty = target_qty - current_qty
+                        trades.append(TradeRecord(
+                            date=current_dt.date(),
+                            symbol=sym,
+                            side="BUY",
+                            qty=delta_qty,
+                            price=price,
+                            value=cost,
+                            pnl=0.0,
+                            pnl_pct=0.0,
+                        ))
+                    elif delta_qty < 0:
+                        sell_qty = -delta_qty
+                        if sell_qty > current_qty:
+                            sell_qty = current_qty
+                        revenue = sell_qty * price
+                        cash += revenue
+                        positions[sym] = current_qty - sell_qty
+                        ep = entry_price[sym] if entry_price[sym] > 0 else price
+                        pnl = (price - ep) * sell_qty
+                        pnl_pct = (price / ep - 1.0) if ep > 0 else 0.0
 
-                        if abs(delta_qty) * price < 1.0:
-                            continue
+                        trades.append(TradeRecord(
+                            date=current_dt.date(),
+                            symbol=sym,
+                            side="SELL_REBAL",
+                            qty=sell_qty,
+                            price=price,
+                            value=revenue,
+                            pnl=pnl,
+                            pnl_pct=pnl_pct,
+                        ))
 
-                        if delta_qty > 0:
-                            cost = delta_qty * price
-                            if cost > cash:
-                                continue
-                            cash -= cost
-                            new_qty = current_qty + delta_qty
-                            if current_qty == 0:
-                                new_ep = price
-                            else:
-                                old_value = current_qty * entry_price[sym]
-                                new_value = old_value + cost
-                                new_ep = new_value / new_qty
+                        if positions[sym] <= 0:
+                            positions[sym] = 0.0
+                            entry_price[sym] = 0.0
 
-                            positions[sym] = new_qty
-                            entry_price[sym] = new_ep
-
-                            trades.append(TradeRecord(
-                                date=current_date.date(),
-                                symbol=sym,
-                                side="BUY",
-                                qty=delta_qty,
-                                price=price,
-                                value=cost,
-                                pnl=0.0,
-                                pnl_pct=0.0
-                            ))
-                        elif delta_qty < 0:
-                            sell_qty = -delta_qty
-                            if sell_qty > current_qty:
-                                sell_qty = current_qty
-                            revenue = sell_qty * price
-                            cash += revenue
-                            positions[sym] = current_qty - sell_qty
-                            ep = entry_price[sym] if entry_price[sym] > 0 else price
-                            pnl = (price - ep) * sell_qty
-                            pnl_pct = (price / ep - 1.0) if ep > 0 else 0.0
-
-                            trades.append(TradeRecord(
-                                date=current_date.date(),
-                                symbol=sym,
-                                side="SELL_REBAL",
-                                qty=sell_qty,
-                                price=price,
-                                value=revenue,
-                                pnl=pnl,
-                                pnl_pct=pnl_pct
-                            ))
-
-                            if positions[sym] <= 0:
-                                positions[sym] = 0.0
-                                entry_price[sym] = 0.0
-
-            # עקומת הון
+            # equity יומי
             portfolio_value = 0.0
             for sym in positions.keys():
                 qty = positions[sym]
@@ -387,14 +386,13 @@ class GenericMomentumStrategy:
                 if np.isnan(price):
                     continue
                 portfolio_value += qty * price
-
             total_equity = cash + portfolio_value
-            equity_records.append({
-                "date": current_date.date(),
-                "equity": total_equity
-            })
+            equity_records.append(
+                {"date": current_dt.date(), "equity": total_equity}
+            )
 
-        equity_df = pd.DataFrame(equity_records).set_index("date")
+        equity_df = pd.DataFrame(equity_records)
+        equity_df.set_index("date", inplace=True)
         return equity_df, trades
 
 
@@ -409,6 +407,8 @@ def compute_max_drawdown(equity: pd.Series) -> float:
 
 
 def compute_trade_stats(trades: List[TradeRecord]) -> Tuple[float, float, int]:
+    if not trades:
+        return 0.0, 0.0, 0
     realized = [t.pnl for t in trades if t.pnl != 0.0]
     if not realized:
         return 0.0, 0.0, 0
@@ -422,17 +422,18 @@ def build_summary(
     market_name: str,
     equity_df: pd.DataFrame,
     trades: List[TradeRecord],
-    benchmark_df: pd.DataFrame
+    benchmark_df: pd.DataFrame,
 ) -> SummaryRecord:
-    final_equity = equity_df["equity"].iloc[-1]
+    equity = equity_df["equity"]
+    final_equity = equity.iloc[-1]
     total_return_pct = (final_equity / INITIAL_CAPITAL - 1.0) * 100.0
     multiple = final_equity / INITIAL_CAPITAL
-    max_dd_pct = compute_max_drawdown(equity_df["equity"])
-
+    max_dd_pct = compute_max_drawdown(equity)
     _, win_rate_pct, num_trades = compute_trade_stats(trades)
 
-    bench_start = benchmark_df["close"].iloc[0]
-    bench_end = benchmark_df["close"].iloc[-1]
+    bench_close = benchmark_df["close"]
+    bench_start = bench_close.iloc[0]
+    bench_end = bench_close.iloc[-1]
     bench_return_pct = (bench_end / bench_start - 1.0) * 100.0
     bench_mult = bench_end / bench_start
 
@@ -452,11 +453,19 @@ def build_summary(
 # שמירת תוצאות
 # =========================
 
-def save_equity_curve(name: str, equity_df: pd.DataFrame):
+def save_equity_curve(name: str, equity_df: pd.DataFrame, bench_equity: pd.Series):
     os.makedirs(RESULTS_DIR, exist_ok=True)
+    df = equity_df.copy()
+    df["benchmark_equity"] = bench_equity.reindex(df.index).ffill()
     path = os.path.join(RESULTS_DIR, f"{name}_equity_curve.csv")
-    equity_df.to_csv(path)
+    df.to_csv(path)
     print(f"נשמר קובץ עקומת הון ({name}): {path}")
+
+
+def build_benchmark_equity(bench_close: pd.Series) -> pd.Series:
+    bench_equity = (bench_close / bench_close.iloc[0]) * INITIAL_CAPITAL
+    bench_equity.index = bench_close.index
+    return bench_equity
 
 
 def save_summary(summaries: List[SummaryRecord]):
@@ -468,23 +477,22 @@ def save_summary(summaries: List[SummaryRecord]):
 
 
 # =========================
-# main – הרצת שלושת השווקים
+# main – שלושת השווקים
 # =========================
 
 def main():
-    print("מתחיל Multi-Asset Momentum Backtest...")
+    print("מתחיל Multi-Asset Momentum Backtest (עם בנצ'מרקים ומדדים מורחבים)...")
 
     summaries: List[SummaryRecord] = []
 
-    # ===== קריפטו =====
+    # --- קריפטו ---
     print("\n=== קריפטו – Binance ===")
     crypto_fetcher = CryptoDataFetcher()
-
-    btc_df_raw = crypto_fetcher.fetch_ohlcv(CRYPTO_BENCHMARK)
-    if btc_df_raw.empty:
+    btc_raw = crypto_fetcher.fetch_ohlcv(CRYPTO_BENCHMARK)
+    if btc_raw.empty:
         print("שגיאה: אין נתוני BTC/USDT.")
     else:
-        btc_df = add_trend_and_momentum(btc_df_raw)
+        btc_df = add_trend_and_momentum(btc_raw)
 
         alt_data: Dict[str, pd.DataFrame] = {}
         for sym in CRYPTO_ALT_SYMBOLS:
@@ -498,23 +506,25 @@ def main():
             alt_data[key] = df
 
         if alt_data:
-            crypto_strategy = GenericMomentumStrategy(btc_df, alt_data, "CRYPTO")
-            crypto_equity, crypto_trades = crypto_strategy.run()
-            crypto_summary = build_summary("CRYPTO", crypto_equity, crypto_trades, btc_df)
+            strat = GenericMomentumStrategy(btc_df, alt_data, "CRYPTO")
+            crypto_equity, crypto_trades = strat.run()
+            crypto_summary, crypto_bench_eq = build_summary("CRYPTO", crypto_equity, crypto_trades, btc_df), \
+                                              build_benchmark_equity(btc_df["close"])
             summaries.append(crypto_summary)
-            print(f"CRYPTO תשואה: {crypto_summary.total_return_pct:.2f}% (Multiple {crypto_summary.multiple:.2f}x), MaxDD {crypto_summary.max_drawdown_pct:.2f}%")
-            save_equity_curve("crypto", crypto_equity)
-        else:
-            print("אין אלטים לקריפטו לאחר סינון.")
+            print(
+                f"CRYPTO תשואה: {crypto_summary.total_return_pct:.2f}% "
+                f"(Multiple {crypto_summary.multiple:.2f}x), "
+                f"MaxDD {crypto_summary.max_drawdown_pct:.2f}%"
+            )
+            save_equity_curve("crypto", crypto_equity, crypto_bench_eq)
 
-    # ===== US Equities =====
+    # --- US ---
     print("\n=== מניות ארה\"ב – Yahoo Finance ===")
     us_data = fetch_yf_history([US_BENCHMARK] + US_STOCKS)
     if US_BENCHMARK not in us_data:
         print("שגיאה: אין נתונים ל-SPY.")
     else:
         spy_df = add_trend_and_momentum(us_data[US_BENCHMARK])
-
         us_assets: Dict[str, pd.DataFrame] = {}
         for ticker in US_STOCKS:
             df = us_data.get(ticker)
@@ -525,23 +535,25 @@ def main():
             us_assets[ticker] = df
 
         if us_assets:
-            us_strategy = GenericMomentumStrategy(spy_df, us_assets, "US")
-            us_equity, us_trades = us_strategy.run()
+            strat = GenericMomentumStrategy(spy_df, us_assets, "US")
+            us_equity, us_trades = strat.run()
             us_summary = build_summary("US", us_equity, us_trades, spy_df)
+            us_bench_eq = build_benchmark_equity(spy_df["close"])
             summaries.append(us_summary)
-            print(f"US תשואה: {us_summary.total_return_pct:.2f}% (Multiple {us_summary.multiple:.2f}x), MaxDD {us_summary.max_drawdown_pct:.2f}%")
-            save_equity_curve("us", us_equity)
-        else:
-            print("אין מניות US לאחר סינון.")
+            print(
+                f"US תשואה: {us_summary.total_return_pct:.2f}% "
+                f"(Multiple {us_summary.multiple:.2f}x), "
+                f"MaxDD {us_summary.max_drawdown_pct:.2f}%"
+            )
+            save_equity_curve("us", us_equity, us_bench_eq)
 
-    # ===== IL Equities =====
+    # --- IL ---
     print("\n=== מניות ישראל – Yahoo Finance ===")
     il_data = fetch_yf_history([IL_BENCHMARK] + IL_STOCKS)
     if IL_BENCHMARK not in il_data:
         print("שגיאה: אין נתונים ל-TA35.TA.")
     else:
         ta_df = add_trend_and_momentum(il_data[IL_BENCHMARK])
-
         il_assets: Dict[str, pd.DataFrame] = {}
         for ticker in IL_STOCKS:
             df = il_data.get(ticker)
@@ -552,19 +564,22 @@ def main():
             il_assets[ticker] = df
 
         if il_assets:
-            il_strategy = GenericMomentumStrategy(ta_df, il_assets, "IL")
-            il_equity, il_trades = il_strategy.run()
+            strat = GenericMomentumStrategy(ta_df, il_assets, "IL")
+            il_equity, il_trades = strat.run()
             il_summary = build_summary("IL", il_equity, il_trades, ta_df)
+            il_bench_eq = build_benchmark_equity(ta_df["close"])
             summaries.append(il_summary)
-            print(f"IL תשואה: {il_summary.total_return_pct:.2f}% (Multiple {il_summary.multiple:.2f}x), MaxDD {il_summary.max_drawdown_pct:.2f}%")
-            save_equity_curve("il", il_equity)
-        else:
-            print("אין מניות IL לאחר סינון.")
+            print(
+                f"IL תשואה: {il_summary.total_return_pct:.2f}% "
+                f"(Multiple {il_summary.multiple:.2f}x), "
+                f"MaxDD {il_summary.max_drawdown_pct:.2f}%"
+            )
+            save_equity_curve("il", il_equity, il_bench_eq)
 
-    # ===== סיכום כולל =====
     if summaries:
         save_summary(summaries)
-    print("\nסיום Multi-Asset Backtest.")
+
+    print("\nסיום Multi-Asset Backtest משופר (100K initial capital).")
 
 
 if __name__ == "__main__":
