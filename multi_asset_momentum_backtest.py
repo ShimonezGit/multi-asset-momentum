@@ -19,7 +19,7 @@ START_DATE = "2022-01-01"
 END_DATE = "2025-12-31"
 TIMEFRAME_CRYPTO = "1d"
 
-# הון התחלתי – עודכן ל-100,000$
+# הון התחלתי – 100,000$
 INITIAL_CAPITAL = 100_000.0
 
 # קריפטו – סל אלטים
@@ -37,7 +37,7 @@ CRYPTO_ALT_SYMBOLS = [
 ]
 CRYPTO_BENCHMARK = "BTC/USDT"
 
-# מניות ארה"ב – universe קשיח
+# מניות ארה"ב
 US_STOCKS = [
     "AAPL",
     "MSFT",
@@ -52,7 +52,7 @@ US_STOCKS = [
 ]
 US_BENCHMARK = "SPY"
 
-# מניות ישראל – universe קשיח עם סיומת .TA
+# מניות ישראל
 IL_STOCKS = [
     "TEVA.TA",
     "LUMI.TA",
@@ -67,10 +67,10 @@ IL_STOCKS = [
 ]
 IL_BENCHMARK = "TA35.TA"
 
-# פרמטרי מומנטום
+# פרמטרי אסטרטגיה
 TREND_MA_WINDOW = 100
 MOMENTUM_LOOKBACK = 20
-MOMENTUM_THRESHOLD = 0.10   # 10% ב-20 יום
+MOMENTUM_THRESHOLD = 0.10
 EXIT_LOOKBACK = 10
 MAX_POSITIONS = 5
 
@@ -148,7 +148,7 @@ class CryptoDataFetcher:
 # =========================
 
 def fetch_yf_history(tickers: List[str]) -> Dict[str, pd.DataFrame]:
-    data = {}
+    data: Dict[str, pd.DataFrame] = {}
     for ticker in tickers:
         df = yf.download(
             ticker,
@@ -156,16 +156,16 @@ def fetch_yf_history(tickers: List[str]) -> Dict[str, pd.DataFrame]:
             end=(pd.to_datetime(END_DATE) + pd.Timedelta(days=1)).strftime("%Y-%m-%d"),
             interval="1d",
             progress=False,
-            auto_adjust=False
+            auto_adjust=False,
         )
         if df.empty:
-            print(f"אזהרה: אין נתונים עבור {ticker} מ-Yahoo, מדלג.")
+            print(f"אזהרה: אין נתונים עבור {ticker}, מדלג.")
             continue
         df = df[["Open", "High", "Low", "Close", "Volume"]].copy()
         df.columns = ["open", "high", "low", "close", "volume"]
         df.index.name = "datetime"
         data[ticker] = df
-        return data
+    return data
 
 
 # =========================
@@ -296,7 +296,6 @@ class GenericMomentumStrategy:
                         positions[sym] = 0.0
                         entry_price[sym] = 0.0
 
-                # חישוב equity לפני פתיחת פוזיציות חדשות
                 portfolio_value = 0.0
                 for sym in positions.keys():
                     qty = positions[sym]
@@ -308,12 +307,8 @@ class GenericMomentumStrategy:
                     portfolio_value += qty * price
                 total_equity = cash + portfolio_value
 
-                if len(desired) > 0:
-                    capital_per_position = total_equity / len(desired)
-                else:
-                    capital_per_position = 0.0
+                capital_per_position = total_equity / len(desired) if len(desired) > 0 else 0.0
 
-                # פתיחה/איזון פוזיציות לנבחרים
                 for sym in desired:
                     price = prices_today.get(sym, np.nan)
                     if np.isnan(price) or price <= 0:
@@ -387,9 +382,7 @@ class GenericMomentumStrategy:
                     continue
                 portfolio_value += qty * price
             total_equity = cash + portfolio_value
-            equity_records.append(
-                {"date": current_dt.date(), "equity": total_equity}
-            )
+            equity_records.append({"date": current_dt.date(), "equity": total_equity})
 
         equity_df = pd.DataFrame(equity_records)
         equity_df.set_index("date", inplace=True)
@@ -416,6 +409,12 @@ def compute_trade_stats(trades: List[TradeRecord]) -> Tuple[float, float, int]:
     win_rate = len(wins) / len(realized) * 100.0
     total_pnl = sum(realized)
     return total_pnl, win_rate, len(realized)
+
+
+def build_benchmark_equity(bench_close: pd.Series) -> pd.Series:
+    bench_equity = (bench_close / bench_close.iloc[0]) * INITIAL_CAPITAL
+    bench_equity.index = bench_close.index
+    return bench_equity
 
 
 def build_summary(
@@ -456,16 +455,12 @@ def build_summary(
 def save_equity_curve(name: str, equity_df: pd.DataFrame, bench_equity: pd.Series):
     os.makedirs(RESULTS_DIR, exist_ok=True)
     df = equity_df.copy()
-    df["benchmark_equity"] = bench_equity.reindex(df.index).ffill()
+    df = df.sort_index()
+    bench_equity = bench_equity.reindex(df.index).ffill()
+    df["benchmark_equity"] = bench_equity
     path = os.path.join(RESULTS_DIR, f"{name}_equity_curve.csv")
     df.to_csv(path)
     print(f"נשמר קובץ עקומת הון ({name}): {path}")
-
-
-def build_benchmark_equity(bench_close: pd.Series) -> pd.Series:
-    bench_equity = (bench_close / bench_close.iloc[0]) * INITIAL_CAPITAL
-    bench_equity.index = bench_close.index
-    return bench_equity
 
 
 def save_summary(summaries: List[SummaryRecord]):
@@ -481,7 +476,7 @@ def save_summary(summaries: List[SummaryRecord]):
 # =========================
 
 def main():
-    print("מתחיל Multi-Asset Momentum Backtest (עם בנצ'מרקים ומדדים מורחבים)...")
+    print("מתחיל Multi-Asset Momentum Backtest (100K initial capital)...")
 
     summaries: List[SummaryRecord] = []
 
@@ -508,8 +503,8 @@ def main():
         if alt_data:
             strat = GenericMomentumStrategy(btc_df, alt_data, "CRYPTO")
             crypto_equity, crypto_trades = strat.run()
-            crypto_summary, crypto_bench_eq = build_summary("CRYPTO", crypto_equity, crypto_trades, btc_df), \
-                                              build_benchmark_equity(btc_df["close"])
+            crypto_summary = build_summary("CRYPTO", crypto_equity, crypto_trades, btc_df)
+            crypto_bench_eq = build_benchmark_equity(btc_df["close"])
             summaries.append(crypto_summary)
             print(
                 f"CRYPTO תשואה: {crypto_summary.total_return_pct:.2f}% "
@@ -579,7 +574,7 @@ def main():
     if summaries:
         save_summary(summaries)
 
-    print("\nסיום Multi-Asset Backtest משופר (100K initial capital).")
+    print("\nסיום Multi-Asset Backtest (100K).")
 
 
 if __name__ == "__main__":
