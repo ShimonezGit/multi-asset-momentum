@@ -2,8 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 multi_asset_app.py
-דשבורד רב-נכסי לניתוח ביצועי אסטרטגיות קריפטו / ארה"ב / ישראל
-מתאים ל-Streamlit Cloud כאפליקציה חיה.
+דשבורד רב-נכסי - קריפטו / ארה"ב / ישראל
 """
 
 import os
@@ -15,7 +14,6 @@ import numpy as np
 import streamlit as st
 
 RESULTS_DIR = "results_multi"
-
 CRYPTO_FILE = os.path.join(RESULTS_DIR, "crypto_equity_curve.csv")
 US_FILE = os.path.join(RESULTS_DIR, "us_equity_curve.csv")
 IL_FILE = os.path.join(RESULTS_DIR, "il_equity_curve.csv")
@@ -29,26 +27,25 @@ def load_csv_with_date(path: str) -> Optional[pd.DataFrame]:
     try:
         df = pd.read_csv(path)
     except Exception as e:
-        st.error(f"שגיאה בטעינת הקובץ: {path} - {e}")
+        st.error(f"שגיאה בטעינת קובץ: {path}")
         return None
     date_col = None
     for cand in DATE_COL_CANDIDATES:
         if cand in df.columns:
             date_col = cand
             break
-    if date_col is None:
-        if "index" in df.columns:
-            df["date"] = pd.to_datetime(df["index"])
-        else:
-            return df
-    else:
+    if date_col:
         df[date_col] = pd.to_datetime(df[date_col])
         df = df.rename(columns={date_col: "date"})
+    elif "index" in df.columns:
+        df["date"] = pd.to_datetime(df["index"])
+    else:
+        return df
     df = df.sort_values(by="date").reset_index(drop=True)
     return df
 
 def filter_by_date_range(df: pd.DataFrame, start: date, end: date) -> pd.DataFrame:
-    if "date" not in df.columns:
+    if df is None or df.empty or "date" not in df.columns:
         return df
     mask = (df["date"].dt.date >= start) & (df["date"].dt.date <= end)
     return df.loc[mask].copy()
@@ -62,30 +59,23 @@ def compute_window_metrics(equity_df: pd.DataFrame) -> Dict[str, float]:
     }
     if equity_df is None or equity_df.empty or "equity" not in equity_df.columns:
         return metrics
-    
     eq = equity_df["equity"].astype(float)
     if len(eq) < 2:
         return metrics
-    
     start_val = eq.iloc[0]
     end_val = eq.iloc[-1]
     if start_val <= 0:
         return metrics
-    
     total_return = (end_val / start_val - 1.0) * 100.0
     pnl_factor = end_val / start_val
-    
     cum_max = eq.cummax()
     drawdown = (eq / cum_max - 1.0) * 100.0
     max_dd = drawdown.min()
-    
-    # Sharpe Ratio (תשואות יומיות)
     daily_returns = eq.pct_change().dropna()
     if len(daily_returns) > 1 and daily_returns.std() > 0:
         sharpe = (daily_returns.mean() / daily_returns.std()) * np.sqrt(252)
     else:
         sharpe = np.nan
-    
     metrics["total_return_pct"] = float(total_return)
     metrics["pnl_factor"] = float(pnl_factor)
     metrics["max_drawdown_pct"] = float(max_dd)
@@ -97,8 +87,7 @@ def load_summary(path: str) -> Optional[pd.DataFrame]:
         return None
     try:
         return pd.read_csv(path)
-    except Exception as e:
-        st.error(f"שגיאה בטעינת summary: {path} - {e}")
+    except:
         return None
 
 def compute_dynamic_summary(
@@ -110,26 +99,20 @@ def compute_dynamic_summary(
     start_date: date,
     end_date: date,
 ) -> pd.DataFrame:
-    """מחשב טבלת summary דינמית לפי הטווח שנבחר."""
     rows = []
-    
     segment_map = {
         "קריפטו": ("CRYPTO", crypto_df),
         "ארה\"ב": ("US", us_df),
         "ישראל": ("IL", il_df),
     }
-    
     for seg_name in segments:
         if seg_name not in segment_map:
             continue
         market_code, df = segment_map[seg_name]
         if df is None or df.empty:
             continue
-        
         filtered = filter_by_date_range(df, start_date, end_date)
         metrics = compute_window_metrics(filtered)
-        
-        # נתוני benchmark מה-summary הסטטי (אם יש)
         bench_return = np.nan
         bench_multiple = np.nan
         if summary_df is not None and not summary_df.empty:
@@ -138,65 +121,38 @@ def compute_dynamic_summary(
                 r = bench_row.iloc[0]
                 bench_return = r.get("benchmark_return_pct", np.nan)
                 bench_multiple = r.get("benchmark_multiple", np.nan)
-        
-        # Alpha = תשואת האסטרטגיה - תשואת הבנצ'מרק
         alpha = metrics["total_return_pct"] - bench_return if not np.isnan(bench_return) else np.nan
-        
         rows.append({
-            "segment": seg_name,
-            "strategy_return_pct": metrics["total_return_pct"],
-            "strategy_multiple": metrics["pnl_factor"],
-            "max_drawdown_pct": metrics["max_drawdown_pct"],
-            "sharpe_ratio": metrics["sharpe"],
-            "benchmark_return_pct": bench_return,
-            "benchmark_multiple": bench_multiple,
-            "alpha_pct": alpha,
+            "סגמנט": seg_name,
+            "תשואה %": metrics["total_return_pct"],
+            "מכפיל": metrics["pnl_factor"],
+            "מקס DD %": metrics["max_drawdown_pct"],
+            "Sharpe": metrics["sharpe"],
+            "Benchmark %": bench_return,
+            "Benchmark x": bench_multiple,
+            "Alpha %": alpha,
         })
-    
     return pd.DataFrame(rows)
 
-def render_segment_block(
-    name: str,
-    df: Optional[pd.DataFrame],
-    start_date: date,
-    end_date: date
-) -> None:
+def render_segment_block(name: str, df: Optional[pd.DataFrame], start_date: date, end_date: date) -> None:
     st.subheader(f"{name}")
     if df is None or df.empty:
         st.warning(f"אין דאטה זמין ל-{name}.")
         return
-    
     filtered = filter_by_date_range(df, start_date, end_date)
     if filtered.empty:
         st.warning("אין נתונים בטווח התאריכים שנבחר.")
         return
-    
     metrics = compute_window_metrics(filtered)
-    
-    # KPI למעלה
     col1, col2, col3, col4 = st.columns(4)
     with col1:
-        st.metric(
-            label="תשואה (%)",
-            value=f"{metrics['total_return_pct']:.1f}" if not np.isnan(metrics["total_return_pct"]) else "N/A",
-        )
+        st.metric("תשואה %", f"{metrics['total_return_pct']:.1f}" if not np.isnan(metrics["total_return_pct"]) else "N/A")
     with col2:
-        st.metric(
-            label="PnL Factor",
-            value=f"{metrics['pnl_factor']:.2f}" if not np.isnan(metrics["pnl_factor"]) else "N/A",
-        )
+        st.metric("מכפיל", f"{metrics['pnl_factor']:.2f}" if not np.isnan(metrics["pnl_factor"]) else "N/A")
     with col3:
-        st.metric(
-            label="Max DD (%)",
-            value=f"{metrics['max_drawdown_pct']:.1f}" if not np.isnan(metrics["max_drawdown_pct"]) else "N/A",
-        )
+        st.metric("Max DD %", f"{metrics['max_drawdown_pct']:.1f}" if not np.isnan(metrics["max_drawdown_pct"]) else "N/A")
     with col4:
-        st.metric(
-            label="Sharpe",
-            value=f"{metrics['sharpe']:.2f}" if not np.isnan(metrics["sharpe"]) else "N/A",
-        )
-    
-    # גרף למטה
+        st.metric("Sharpe", f"{metrics['sharpe']:.2f}" if not np.isnan(metrics["sharpe"]) else "N/A")
     if "equity" in filtered.columns:
         st.line_chart(filtered.set_index("date")["equity"], height=250)
     else:
@@ -205,7 +161,7 @@ def render_segment_block(
 def main() -> None:
     st.set_page_config(page_title="Multi-Asset Strategy Dashboard", layout="wide")
     st.title("Multi-Asset Strategy Dashboard")
-    st.caption("קריפטו / שוק אמריקאי / שוק ישראלי – מבוסס תוצאות קיימות")
+    st.caption("קריפטו / שוק אמריקאי / שוק ישראלי")
     
     crypto_df = load_csv_with_date(CRYPTO_FILE)
     us_df = load_csv_with_date(US_FILE)
@@ -216,7 +172,6 @@ def main() -> None:
     for df in [crypto_df, us_df, il_df]:
         if df is not None and not df.empty and "date" in df.columns:
             all_dates.append(df["date"])
-    
     if all_dates:
         global_min = min(s.min() for s in all_dates).date()
         global_max = max(s.max() for s in all_dates).date()
@@ -226,27 +181,57 @@ def main() -> None:
     
     st.sidebar.header("מסננים")
     selected_segments = st.sidebar.multiselect(
-        "בחר סגמנטים להצגה:",
+        "בחר סגמנטים:",
         options=["קריפטו", "ארה\"ב", "ישראל"],
         default=["קריפטו", "ארה\"ב", "ישראל"],
     )
-    
     date_input_val = st.sidebar.date_input(
-        "בחר טווח תאריכים:",
+        "טווח תאריכים:",
         value=(global_min, global_max),
         min_value=global_min,
         max_value=global_max,
     )
-    
     if isinstance(date_input_val, tuple):
         start_date, end_date = date_input_val
     else:
         start_date = end_date = date_input_val
-    
     if start_date > end_date:
-        st.sidebar.error("תאריך ההתחלה גדול מתאריך הסיום.")
+        st.sidebar.error("תאריך התחלה גדול מתאריך סיום.")
         st.stop()
-    
     st.sidebar.markdown("---")
-    st.sidebar.write(f"**טווח גלובלי:** {global_min} – {global_max}")
-    st.sidebar.write(f"**טווח נבחר:** {start_date}
+    st.sidebar.write(f"טווח גלובלי: {global_min} – {global_max}")
+    st.sidebar.write(f"טווח נבחר: {start_date} – {end_date}")
+    
+    st.markdown("### סיכום דינמי לפי הטווח הנבחר")
+    if selected_segments:
+        dynamic_summary = compute_dynamic_summary(
+            selected_segments, crypto_df, us_df, il_df, summary_df, start_date, end_date
+        )
+        if not dynamic_summary.empty:
+            st.dataframe(dynamic_summary.style.format({
+                "תשואה %": "{:.1f}",
+                "מכפיל": "{:.2f}",
+                "מקס DD %": "{:.1f}",
+                "Sharpe": "{:.2f}",
+                "Benchmark %": "{:.1f}",
+                "Benchmark x": "{:.2f}",
+                "Alpha %": "{:.1f}",
+            }))
+        else:
+            st.info("אין נתונים לטווח הנבחר.")
+    else:
+        st.info("בחר לפחות סגמנט אחד.")
+    
+    st.markdown("---")
+    if "קריפטו" in selected_segments:
+        render_segment_block("קריפטו (Crypto)", crypto_df, start_date, end_date)
+    if "ארה\"ב" in selected_segments:
+        render_segment_block("שוק אמריקאי (US)", us_df, start_date, end_date)
+    if "ישראל" in selected_segments:
+        render_segment_block("שוק ישראלי (IL)", il_df, start_date, end_date)
+    
+    st.markdown("---")
+    st.caption("דשבורד חיי – תצוגת ביצועים בלבד.")
+
+if __name__ == "__main__":
+    main()
