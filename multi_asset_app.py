@@ -8,7 +8,7 @@ multi_asset_app.py
 
 import os
 from datetime import date
-from typing import Dict, Optional
+from typing import Dict, Optional, List
 
 import pandas as pd
 import numpy as np
@@ -39,76 +39,145 @@ def load_csv_with_date(path: str) -> Optional[pd.DataFrame]:
     if date_col is None:
         if "index" in df.columns:
             df["date"] = pd.to_datetime(df["index"])
-            date_col = "date"
         else:
             return df
-    df[date_col] = pd.to_datetime(df[date_col])
-    df = df.sort_values(by=date_col).reset_index(drop=True)
-    df = df.rename(columns={date_col: "date"})
+    else:
+        df[date_col] = pd.to_datetime(df[date_col])
+        df = df.rename(columns={date_col: "date"})
+    df = df.sort_values(by="date").reset_index(drop=True)
     return df
 
 def filter_by_date_range(df: pd.DataFrame, start: date, end: date) -> pd.DataFrame:
     if "date" not in df.columns:
         return df
     mask = (df["date"].dt.date >= start) & (df["date"].dt.date <= end)
-    filtered = df.loc[mask].copy()
-    return filtered
+    return df.loc[mask].copy()
 
 def compute_window_metrics(equity_df: pd.DataFrame) -> Dict[str, float]:
     metrics = {
         "total_return_pct": np.nan,
         "pnl_factor": np.nan,
         "max_drawdown_pct": np.nan,
+        "sharpe": np.nan,
     }
-    if equity_df is None or equity_df.empty:
+    if equity_df is None or equity_df.empty or "equity" not in equity_df.columns:
         return metrics
-    if "equity" not in equity_df.columns:
-        return metrics
+    
     eq = equity_df["equity"].astype(float)
     if len(eq) < 2:
         return metrics
+    
     start_val = eq.iloc[0]
     end_val = eq.iloc[-1]
     if start_val <= 0:
         return metrics
+    
     total_return = (end_val / start_val - 1.0) * 100.0
     pnl_factor = end_val / start_val
+    
     cum_max = eq.cummax()
     drawdown = (eq / cum_max - 1.0) * 100.0
     max_dd = drawdown.min()
+    
+    # Sharpe Ratio (תשואות יומיות)
+    daily_returns = eq.pct_change().dropna()
+    if len(daily_returns) > 1 and daily_returns.std() > 0:
+        sharpe = (daily_returns.mean() / daily_returns.std()) * np.sqrt(252)
+    else:
+        sharpe = np.nan
+    
     metrics["total_return_pct"] = float(total_return)
     metrics["pnl_factor"] = float(pnl_factor)
     metrics["max_drawdown_pct"] = float(max_dd)
+    metrics["sharpe"] = float(sharpe)
     return metrics
 
 def load_summary(path: str) -> Optional[pd.DataFrame]:
     if not os.path.exists(path):
         return None
     try:
-        df = pd.read_csv(path)
-        return df
+        return pd.read_csv(path)
     except Exception as e:
         st.error(f"שגיאה בטעינת summary: {path} - {e}")
         return None
 
-def render_segment_block(name: str, df: Optional[pd.DataFrame], start_date: date, end_date: date) -> None:
+def compute_dynamic_summary(
+    segments: List[str],
+    crypto_df: Optional[pd.DataFrame],
+    us_df: Optional[pd.DataFrame],
+    il_df: Optional[pd.DataFrame],
+    summary_df: Optional[pd.DataFrame],
+    start_date: date,
+    end_date: date,
+) -> pd.DataFrame:
+    """מחשב טבלת summary דינמית לפי הטווח שנבחר."""
+    rows = []
+    
+    segment_map = {
+        "קריפטו": ("CRYPTO", crypto_df),
+        "ארה\"ב": ("US", us_df),
+        "ישראל": ("IL", il_df),
+    }
+    
+    for seg_name in segments:
+        if seg_name not in segment_map:
+            continue
+        market_code, df = segment_map[seg_name]
+        if df is None or df.empty:
+            continue
+        
+        filtered = filter_by_date_range(df, start_date, end_date)
+        metrics = compute_window_metrics(filtered)
+        
+        # נתוני benchmark מה-summary הסטטי (אם יש)
+        bench_return = np.nan
+        bench_multiple = np.nan
+        if summary_df is not None and not summary_df.empty:
+            bench_row = summary_df[summary_df["market"] == market_code]
+            if not bench_row.empty:
+                r = bench_row.iloc[0]
+                bench_return = r.get("benchmark_return_pct", np.nan)
+                bench_multiple = r.get("benchmark_multiple", np.nan)
+        
+        # Alpha = תשואת האסטרטגיה - תשואת הבנצ'מרק
+        alpha = metrics["total_return_pct"] - bench_return if not np.isnan(bench_return) else np.nan
+        
+        rows.append({
+            "segment": seg_name,
+            "strategy_return_pct": metrics["total_return_pct"],
+            "strategy_multiple": metrics["pnl_factor"],
+            "max_drawdown_pct": metrics["max_drawdown_pct"],
+            "sharpe_ratio": metrics["sharpe"],
+            "benchmark_return_pct": bench_return,
+            "benchmark_multiple": bench_multiple,
+            "alpha_pct": alpha,
+        })
+    
+    return pd.DataFrame(rows)
+
+def render_segment_block(
+    name: str,
+    df: Optional[pd.DataFrame],
+    start_date: date,
+    end_date: date
+) -> None:
     st.subheader(f"{name}")
     if df is None or df.empty:
         st.warning(f"אין דאטה זמין ל-{name}.")
         return
+    
     filtered = filter_by_date_range(df, start_date, end_date)
     if filtered.empty:
         st.warning("אין נתונים בטווח התאריכים שנבחר.")
         return
-    if "equity" in filtered.columns:
-        st.line_chart(filtered.set_index("date")["equity"], height=250)
-    else:
-        st.warning("לא נמצאה עמודת equity - לא ניתן להציג עקומת הון.")
+    
     metrics = compute_window_metrics(filtered)
-    col1, col2, col3 = st.columns(3)
+    
+    # KPI למעלה
+    col1, col2, col3, col4 = st.columns(4)
     with col1:
         st.metric(
-            label="תשואה כוללת בטווח (%)",
+            label="תשואה (%)",
             value=f"{metrics['total_return_pct']:.1f}" if not np.isnan(metrics["total_return_pct"]) else "N/A",
         )
     with col2:
@@ -118,9 +187,20 @@ def render_segment_block(name: str, df: Optional[pd.DataFrame], start_date: date
         )
     with col3:
         st.metric(
-            label="Max Drawdown (%)",
+            label="Max DD (%)",
             value=f"{metrics['max_drawdown_pct']:.1f}" if not np.isnan(metrics["max_drawdown_pct"]) else "N/A",
         )
+    with col4:
+        st.metric(
+            label="Sharpe",
+            value=f"{metrics['sharpe']:.2f}" if not np.isnan(metrics["sharpe"]) else "N/A",
+        )
+    
+    # גרף למטה
+    if "equity" in filtered.columns:
+        st.line_chart(filtered.set_index("date")["equity"], height=250)
+    else:
+        st.warning("לא נמצאה עמודת equity.")
 
 def main() -> None:
     st.set_page_config(page_title="Multi-Asset Strategy Dashboard", layout="wide")
@@ -151,71 +231,22 @@ def main() -> None:
         default=["קריפטו", "ארה\"ב", "ישראל"],
     )
     
-    start_date, end_date = st.sidebar.date_input(
+    date_input_val = st.sidebar.date_input(
         "בחר טווח תאריכים:",
         value=(global_min, global_max),
         min_value=global_min,
         max_value=global_max,
     )
     
-    if isinstance(start_date, (list, tuple)):
-        start_date, end_date = start_date
+    if isinstance(date_input_val, tuple):
+        start_date, end_date = date_input_val
+    else:
+        start_date = end_date = date_input_val
     
     if start_date > end_date:
-        st.sidebar.error("תאריך ההתחלה גדול מתאריך הסיום. תקן את הטווח.")
+        st.sidebar.error("תאריך ההתחלה גדול מתאריך הסיום.")
         st.stop()
     
     st.sidebar.markdown("---")
-    st.sidebar.write(f"**טווח גלובלי בדאטה:** {global_min} עד {global_max}")
-    st.sidebar.write(f"**טווח נבחר:** {start_date} עד {end_date}")
-    
-    st.markdown("### סיכום כללי לפי סגמנט")
-    
-    if summary_df is not None and not summary_df.empty:
-        cols_map = {}
-        for col in summary_df.columns:
-            low = col.lower()
-            if "segment" in low or "market" in low or "asset" in low:
-                cols_map[col] = "segment"
-            elif "total_return" in low or "return_pct" in low:
-                cols_map[col] = "total_return"
-            elif "pnl_factor" in low or "multiplier" in low or "multiple" in low:
-                cols_map[col] = "pnl_factor"
-            elif "drawdown" in low:
-                cols_map[col] = "max_drawdown"
-            elif "win_rate" in low or "winrate" in low:
-                cols_map[col] = "win_rate"
-        
-        summary = summary_df.rename(columns=cols_map).copy()
-        summary = summary.loc[:, ~summary.columns.duplicated()]
-        
-        display_cols = []
-        for c in ["segment", "total_return", "pnl_factor", "max_drawdown", "win_rate"]:
-            if c in summary.columns:
-                display_cols.append(c)
-        
-        if display_cols:
-            st.dataframe(summary[display_cols])
-        else:
-            st.info("לא נמצאו עמודות מוכרות ל-summary, מציג טבלה מלאה:")
-            st.dataframe(summary)
-    else:
-        st.info("לא נמצא קובץ multi_summary.csv או שהוא ריק.")
-    
-    st.markdown("---")
-    
-    if "קריפטו" in selected_segments:
-        render_segment_block("קריפטו (Crypto)", crypto_df, start_date, end_date)
-    
-    if "ארה\"ב" in selected_segments:
-        render_segment_block("שוק אמריקאי (US)", us_df, start_date, end_date)
-    
-    if "ישראל" in selected_segments:
-        render_segment_block("שוק ישראלי (IL)", il_df, start_date, end_date)
-    
-    st.markdown("---")
-    st.caption("דשבורד חיי – תצוגת ביצועים בלבד, ללא ביצוע פקודות מסחר מהענן.")
-
-if __name__ == "__main__":
-    main()
-
+    st.sidebar.write(f"**טווח גלובלי:** {global_min} – {global_max}")
+    st.sidebar.write(f"**טווח נבחר:** {start_date}
