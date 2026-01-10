@@ -26,7 +26,7 @@ def load_csv_with_date(path: str) -> Optional[pd.DataFrame]:
         if "date" not in df.columns and "index" in df.columns:
             df["date"] = pd.to_datetime(df["index"])
         return df.sort_values(by="date").reset_index(drop=True) if "date" in df.columns else df
-    except:
+    except Exception:
         return None
 
 def filter_by_date_range(df: pd.DataFrame, start: date, end: date) -> pd.DataFrame:
@@ -63,13 +63,28 @@ def compute_dynamic_summary(segments: List[str], crypto_df, us_df, il_df, start_
             continue
         filt = filter_by_date_range(df, start_date, end_date)
         sm = compute_window_metrics(filt, "equity")
-        bm = compute_window_metrics(filt, "benchmark_equity") if "benchmark_equity" in filt.columns else {"total_return_pct": np.nan, "pnl_factor": np.nan}
+        bm = compute_window_metrics(filt, "benchmark_equity") if "benchmark_equity" in filt.columns else {
+            "total_return_pct": np.nan,
+            "pnl_factor": np.nan
+        }
         alpha = sm["total_return_pct"] - bm["total_return_pct"]
-        rows.append({"סגמנט": seg, "Strategy תשואה": sm["total_return_pct"], "Strategy מכפיל": sm["pnl_factor"], "Strategy Sharpe": sm["sharpe"], f"{bn} תשואה": bm["total_return_pct"], f"{bn} מכפיל": bm["pnl_factor"], "Alpha": alpha})
+        rows.append({
+            "סגמנט": seg,
+            "Strategy תשואה": sm["total_return_pct"],
+            "Strategy מכפיל": sm["pnl_factor"],
+            "Strategy Sharpe": sm["sharpe"],
+            f"{bn} תשואה": bm["total_return_pct"],
+            f"{bn} מכפיל": bm["pnl_factor"],
+            "Alpha": alpha
+        })
     return pd.DataFrame(rows)
 
 def render_colored_metric(label: str, value: str, color: str):
-    st.markdown(f'<div style="text-align:center;"><div style="font-size:14px;color:#888;">{label}</div><div style="font-size:28px;font-weight:bold;color:{color};">{value}</div></div>', unsafe_allow_html=True)
+    st.markdown(
+        f'<div style="text-align:center;"><div style="font-size:14px;color:#888;">{label}</div>'
+        f'<div style="font-size:28px;font-weight:bold;color:{color};">{value}</div></div>',
+        unsafe_allow_html=True
+    )
 
 def render_segment_block(name: str, df, start_date: date, end_date: date, bn: str):
     st.subheader(f"{name}")
@@ -82,7 +97,12 @@ def render_segment_block(name: str, df, start_date: date, end_date: date, bn: st
         return
     cm = st.radio("הצג:", ["Strategy בלבד", f"{bn} בלבד", "שניהם"], index=2, key=f"c_{name}", horizontal=True)
     sm = compute_window_metrics(filt, "equity")
-    bm = compute_window_metrics(filt, "benchmark_equity") if "benchmark_equity" in filt.columns else {"total_return_pct": np.nan, "pnl_factor": np.nan, "max_drawdown_pct": np.nan, "sharpe": np.nan}
+    bm = compute_window_metrics(filt, "benchmark_equity") if "benchmark_equity" in filt.columns else {
+        "total_return_pct": np.nan,
+        "pnl_factor": np.nan,
+        "max_drawdown_pct": np.nan,
+        "sharpe": np.nan
+    }
     st.markdown("**Strategy (אסטרטגיה)**")
     c1, c2, c3, c4 = st.columns(4)
     with c1:
@@ -124,9 +144,11 @@ def main():
     st.caption("קריפטו מול BTC | ארה\"ב מול S&P500 | ישראל מול TA-125")
     with st.expander("📖 מדריך מהיר"):
         st.markdown("**תשואה** – אחוז גידול. **מכפיל** – הון סופי/התחלתי. **Max DD** – ירידה מקסימלית. **Sharpe** – תשואה מתואמת סיכון (>2 מצוין). **Alpha** – יתרון על המדד.")
+
     crypto_df = load_csv_with_date(CRYPTO_FILE)
     us_df = load_csv_with_date(US_FILE)
     il_df = load_csv_with_date(IL_FILE)
+
     all_dates = []
     for df in [crypto_df, us_df, il_df]:
         if df is not None and not df.empty and "date" in df.columns:
@@ -137,15 +159,15 @@ def main():
     else:
         gmax = date.today()
         gmin = date(gmax.year - 1, gmax.month, gmax.day)
-    
+
     st.sidebar.header("מסננים")
     segs = st.sidebar.multiselect("בחר סגמנטים:", ["קריפטו", "ארה\"ב", "ישראל"], default=["קריפטו", "ארה\"ב", "ישראל"])
-    
+
     st.sidebar.markdown("### טווח תאריכים")
     years = list(range(gmin.year, gmax.year + 1))
     months = list(range(1, 13))
     month_names = ["ינואר", "פברואר", "מרץ", "אפריל", "מאי", "יוני", "יולי", "אוגוסט", "ספטמבר", "אוקטובר", "נובמבר", "דצמבר"]
-    
+
     c1, c2 = st.sidebar.columns(2)
     with c1:
         sy = st.selectbox("שנת התחלה", years, index=0)
@@ -153,33 +175,94 @@ def main():
     with c2:
         ey = st.selectbox("שנת סיום", years, index=len(years)-1)
         em = st.selectbox("חודש סיום", months, format_func=lambda x: month_names[x-1], index=len(months)-1)
-    
+
     if st.sidebar.button("🔍 חפש", type="primary"):
         st.session_state["custom_range"] = (date(sy, sm, 1), date(ey, em, 28))
-    
+
     if "custom_range" in st.session_state:
         sd, ed = st.session_state["custom_range"]
     else:
         sd, ed = gmin, gmax
-    
+
     st.sidebar.markdown("---")
     st.sidebar.write(f"**טווח נבחר:** {sd} – {ed}")
-    
+
     st.markdown("### סיכום דינמי")
     if segs:
         ds = compute_dynamic_summary(segs, crypto_df, us_df, il_df, sd, ed)
         if not ds.empty:
-            dd = ds.copy()
-            for col in ["Strategy תשואה", "BTC תשואה", "S&P500 תשואה", "TA-125 תשואה", "Alpha"]:
-                if col in dd.columns:
-                    dd[col] = dd[col].apply(lambda x: f"{x:.1f}%" if pd.notna(x) else "N/A")
-            for col in ["Strategy מכפיל", "BTC מכפיל", "S&P500 מכפיל", "TA-125 מכפיל"]:
-                if col in dd.columns:
-                    dd[col] = dd[col].apply(lambda x: f"{x:.2f}x" if pd.notna(x) else "N/A")
-            if "Strategy Sharpe" in dd.columns:
-                dd["Strategy Sharpe"] = dd["Strategy Sharpe"].apply(lambda x: f"{x:.2f}" if pd.notna(x) else "N/A")
-            st.dataframe(dd)
-    
+            # קריפטו – רק Strategy ו-BTC
+            if "קריפטו" in segs:
+                cdf = ds[ds["סגמנט"] == "קריפטו"].copy()
+                if not cdf.empty:
+                    st.markdown("#### קריפטו")
+                    cols_order = [
+                        "Strategy תשואה",
+                        "Strategy מכפיל",
+                        "Strategy Sharpe",
+                        "BTC תשואה",
+                        "BTC מכפיל",
+                        "Alpha",
+                    ]
+                    cdf = cdf[[col for col in cols_order if col in cdf.columns]]
+                    for col in ["Strategy תשואה", "BTC תשואה", "Alpha"]:
+                        if col in cdf.columns:
+                            cdf[col] = cdf[col].apply(lambda x: f"{x:.1f}%" if pd.notna(x) else "N/A")
+                    for col in ["Strategy מכפיל", "BTC מכפיל"]:
+                        if col in cdf.columns:
+                            cdf[col] = cdf[col].apply(lambda x: f"{x:.2f}x" if pd.notna(x) else "N/A")
+                    if "Strategy Sharpe" in cdf.columns:
+                        cdf["Strategy Sharpe"] = cdf["Strategy Sharpe"].apply(lambda x: f"{x:.2f}" if pd.notna(x) else "N/A")
+                    st.dataframe(cdf)
+
+            # ארה"ב – רק Strategy ו-S&P500
+            if "ארה\"ב" in segs:
+                udf = ds[ds["סגמנט"] == "ארה\"ב"].copy()
+                if not udf.empty:
+                    st.markdown("#### ארה\"ב")
+                    cols_order = [
+                        "Strategy תשואה",
+                        "Strategy מכפיל",
+                        "Strategy Sharpe",
+                        "S&P500 תשואה",
+                        "S&P500 מכפיל",
+                        "Alpha",
+                    ]
+                    udf = udf[[col for col in cols_order if col in udf.columns]]
+                    for col in ["Strategy תשואה", "S&P500 תשואה", "Alpha"]:
+                        if col in udf.columns:
+                            udf[col] = udf[col].apply(lambda x: f"{x:.1f}%" if pd.notna(x) else "N/A")
+                    for col in ["Strategy מכפיל", "S&P500 מכפיל"]:
+                        if col in udf.columns:
+                            udf[col] = udf[col].apply(lambda x: f"{x:.2f}x" if pd.notna(x) else "N/A")
+                    if "Strategy Sharpe" in udf.columns:
+                        udf["Strategy Sharpe"] = udf["Strategy Sharpe"].apply(lambda x: f"{x:.2f}" if pd.notna(x) else "N/A")
+                    st.dataframe(udf)
+
+            # ישראל – רק Strategy ו-TA-125
+            if "ישראל" in segs:
+                idf = ds[ds["סגמנט"] == "ישראל"].copy()
+                if not idf.empty:
+                    st.markdown("#### ישראל")
+                    cols_order = [
+                        "Strategy תשואה",
+                        "Strategy מכפיל",
+                        "Strategy Sharpe",
+                        "TA-125 תשואה",
+                        "TA-125 מכפיל",
+                        "Alpha",
+                    ]
+                    idf = idf[[col for col in cols_order if col in idf.columns]]
+                    for col in ["Strategy תשואה", "TA-125 תשואה", "Alpha"]:
+                        if col in idf.columns:
+                            idf[col] = idf[col].apply(lambda x: f"{x:.1f}%" if pd.notna(x) else "N/A")
+                    for col in ["Strategy מכפיל", "TA-125 מכפיל"]:
+                        if col in idf.columns:
+                            idf[col] = idf[col].apply(lambda x: f"{x:.2f}x" if pd.notna(x) else "N/A")
+                    if "Strategy Sharpe" in idf.columns:
+                        idf["Strategy Sharpe"] = idf["Strategy Sharpe"].apply(lambda x: f"{x:.2f}" if pd.notna(x) else "N/A")
+                    st.dataframe(idf)
+
     st.markdown("---")
     if "קריפטו" in segs:
         render_segment_block("קריפטו (Crypto)", crypto_df, sd, ed, "BTC")
@@ -187,7 +270,7 @@ def main():
         render_segment_block("שוק אמריקאי (US)", us_df, sd, ed, "S&P500")
     if "ישראל" in segs:
         render_segment_block("שוק ישראלי (IL)", il_df, sd, ed, "TA-125")
-    
+
     st.markdown("---")
     st.caption("דשבורד חיי – Strategy vs Benchmark")
 
