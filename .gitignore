@@ -14,10 +14,18 @@ venv/
 # Logs
 *.log
 
-# Local data / results (נשאיר רק קבצים חשובים ידנית אם תרצה)
-results_multi/*.csv
-results_multi/*.md
+# Results – ברירת מחדל להתעלם
+results_multi/*
 btc_5m_binance_clean.csv
+
+# אבל את אלה כן נעלה
+!results_multi/crypto_paper_equity.csv
+!results_multi/us_paper_equity.csv
+!results_multi/multi_adaptive_paper_equity.csv
+!results_multi/crypto_equity_curve.csv
+!results_multi/us_equity_curve.csv
+!results_multi/multi_asset_summary.csv
+!results_multi/multi_adaptive_paper_summary.csv
 
 # Streamlit cache
 .streamlit/
