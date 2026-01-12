@@ -1,5 +1,6 @@
-streamlit
-pandas
-numpy
-ccxt
-yfinance
+streamlit>=1.40
+pandas>=2.0
+numpy>=2.0
+plotly>=5.0
+yfinance>=0.2
+ccxt>=4.2
