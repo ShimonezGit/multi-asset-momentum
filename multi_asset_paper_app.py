@@ -14,7 +14,7 @@ import streamlit as st
 # ---------------------------------------------------------------------
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-RESULTS_DIR = os.path.join(BASE_DIR, "resultsmulti")
+RESULTS_DIR = os.path.join(BASE_DIR, "results_multi")
 
 CRYPTO_STRAT_FILE = os.path.join(RESULTS_DIR, "crypto_paper_equity.csv")
 CRYPTO_BENCH_FILE = os.path.join(RESULTS_DIR, "crypto_equity_curve.csv")
