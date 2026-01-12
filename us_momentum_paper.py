@@ -1,31 +1,33 @@
 #!/usr/bin/env python3
 # coding: utf-8
 """
-multi_asset_crypto.py
-Momentum Backtest 100% זהה לבקטסט - גרסה מתוקנת סופית
+US Momentum Paper Trading
+אותה אסטרטגיה מנצחת על מניות ארה"ב
 """
+
 import os
-import time
 from dataclasses import dataclass, asdict
 from typing import Dict, List
 import numpy as np
 import pandas as pd
-import ccxt
+import yfinance as yf
 
 START_DATE = "2022-01-01"
 END_DATE = "2025-12-31"
-TIMEFRAME_CRYPTO = "1d"
 INITIAL_CAPITAL = 100000.0
-CRYPTO_BENCHMARK = "BTC/USDT"
-CRYPTO_ALT_SYMBOLS = ["ETH/USDT", "BNB/USDT", "SOL/USDT", "XRP/USDT", "ADA/USDT", "AVAX/USDT", "DOGE/USDT", "LINK/USDT", "MATIC/USDT", "OP/USDT"]
+
+US_BENCHMARK = "SPY"
+US_STOCKS = ["AAPL", "MSFT", "NVDA", "AMZN", "META", "TSLA", "GOOGL", "AVGO", "AMD", "NFLX"]
+
 TREND_MA_WINDOW = 100
 MOMENTUM_LOOKBACK = 20
 EXIT_LOOKBACK = 10
 MOMENTUM_THRESHOLD = 0.10
 MAX_POSITIONS = 5
+
 RESULTS_DIR = "results_multi"
-PAPER_TRADES_FILE = os.path.join(RESULTS_DIR, "crypto_trades.csv")
-PAPER_EQUITY_FILE = os.path.join(RESULTS_DIR, "crypto_equity.csv")
+PAPER_TRADES_FILE = os.path.join(RESULTS_DIR, "us_paper_trades.csv")
+PAPER_EQUITY_FILE = os.path.join(RESULTS_DIR, "us_paper_equity.csv")
 
 @dataclass
 class PaperTradeLog:
@@ -43,46 +45,15 @@ class PositionState:
     amount: float
     cost_basis: float
 
-def init_binance_real():
-    return ccxt.binance({"enableRateLimit": True})
-
-def fetch_ohlcv_for_symbol(exchange, symbol, timeframe, since_ms, until_ms):
-    all_data = []
-    limit = 1000
-    since = since_ms
-    while True:
-        ohlcv = exchange.fetch_ohlcv(symbol, timeframe=timeframe, since=since, limit=limit)
-        if not ohlcv:
-            break
-        all_data.extend(ohlcv)
-        last_ts = ohlcv[-1][0]
-        if last_ts >= until_ms:
-            break
-        since = last_ts + 1
-        time.sleep(exchange.rateLimit / 1000.0)
-    if not all_data:
+def fetch_yf_data(ticker: str):
+    df = yf.download(ticker, start=START_DATE, end=pd.to_datetime(END_DATE) + pd.Timedelta(days=1), 
+                     interval="1d", progress=False, auto_adjust=False)
+    if df.empty:
         return pd.DataFrame()
-    df = pd.DataFrame(all_data, columns=["timestamp", "open", "high", "low", "close", "volume"])
-    df["datetime"] = pd.to_datetime(df["timestamp"], unit="ms")
-    df.set_index("datetime", inplace=True)
-    df = df.sort_index()
-    df = df[(df.index >= START_DATE) & (df.index <= END_DATE)]
-    return df[["open", "high", "low", "close", "volume"]].copy()
-
-def fetch_crypto_universe(exchange):
-    start_ms = int(pd.Timestamp(START_DATE).timestamp() * 1000)
-    end_ms = int(pd.Timestamp(END_DATE).timestamp() * 1000)
-    print(f"מוריד BTC לטווח {START_DATE} עד {END_DATE}...")
-    btc_df = fetch_ohlcv_for_symbol(exchange, CRYPTO_BENCHMARK, TIMEFRAME_CRYPTO, start_ms, end_ms)
-    if btc_df.empty:
-        raise RuntimeError("לא נמצא BTC/USDT")
-    alt_data = {}
-    for alt in CRYPTO_ALT_SYMBOLS:
-        print(f"מוריד {alt}...")
-        df = fetch_ohlcv_for_symbol(exchange, alt, TIMEFRAME_CRYPTO, start_ms, end_ms)
-        if not df.empty:
-            alt_data[alt] = df
-    return btc_df, alt_data
+    df = df[["Open", "High", "Low", "Close", "Volume"]].copy()
+    df.columns = ["open", "high", "low", "close", "volume"]
+    df.index.name = "datetime"
+    return df
 
 def add_indicators(df):
     out = df.copy()
@@ -92,9 +63,9 @@ def add_indicators(df):
     out["ret_exit"] = out["close"].pct_change(EXIT_LOOKBACK)
     return out
 
-def build_calendar(benchmark_df, alt_data):
+def build_calendar(benchmark_df, stock_data):
     idx = benchmark_df.index
-    for df in alt_data.values():
+    for df in stock_data.values():
         idx = idx.union(df.index)
     return idx.sort_values()
 
@@ -114,24 +85,39 @@ def log_trade(timestamp, dt, symbol, side, amount, price):
     else:
         row_df.to_csv(PAPER_TRADES_FILE, mode="a", header=False, index=False)
 
-def run_crypto():
-    print("מתחבר ל-Binance real...")
-    exchange = init_binance_real()
-    btc_df_raw, alt_data_raw = fetch_crypto_universe(exchange)
-    btc_df = add_indicators(btc_df_raw)
-    alt_data = {sym: add_indicators(df) for sym, df in alt_data_raw.items()}
-    universe_data = {**alt_data}  # BTC = benchmark בלבד
-    calendar = build_calendar(btc_df, alt_data)
-    closes = build_matrix(calendar, universe_data, "close")
-    momentum = build_matrix(calendar, universe_data, "ret_mom")
-    exit_ret = build_matrix(calendar, universe_data, "ret_exit")
-    trend_series = btc_df["trend_up"].reindex(calendar).ffill().fillna(False)
+def run_us_paper():
+    print("מוריד SPY (benchmark)...")
+    spy_df = fetch_yf_data(US_BENCHMARK)
+    if spy_df.empty:
+        raise RuntimeError("לא נמצא SPY")
+    
+    spy_df = add_indicators(spy_df)
+    
+    stock_data = {}
+    for stock in US_STOCKS:
+        print(f"מוריד {stock}...")
+        df = fetch_yf_data(stock)
+        if not df.empty:
+            stock_data[stock] = add_indicators(df)
+    
+    if not stock_data:
+        raise RuntimeError("לא נמצאו מניות")
+    
+    calendar = build_calendar(spy_df, stock_data)
+    closes = build_matrix(calendar, stock_data, "close")
+    momentum = build_matrix(calendar, stock_data, "ret_mom")
+    exit_ret = build_matrix(calendar, stock_data, "ret_exit")
+    trend_series = spy_df["trend_up"].reindex(calendar).ffill().fillna(False)
+    
     cash = INITIAL_CAPITAL
     positions = {}
     equity_records = []
-    print(f"מריץ Momentum Backtest על {len(calendar)} ימים...")
+    
+    print(f"מריץ Paper Trading על {len(calendar)} ימים...")
+    
     for current_dt in calendar:
         prices = closes.loc[current_dt]
+        
         for sym in list(positions.keys()):
             if sym not in prices or np.isnan(prices[sym]):
                 continue
@@ -140,44 +126,61 @@ def run_crypto():
             if exit_signal <= 0.0:
                 sell_value = pos.amount * prices[sym]
                 cash += sell_value
-                log_trade(int(current_dt.timestamp() * 1000), current_dt.isoformat(), sym, "SELL", pos.amount, prices[sym])
+                log_trade(int(current_dt.timestamp() * 1_000_000_000), current_dt.isoformat(), 
+                         sym, "SELL", pos.amount, prices[sym])
                 positions.pop(sym)
-        portfolio_value = sum(pos.amount * prices.get(sym, 0) for sym, pos in positions.items() if sym in prices and not np.isnan(prices[sym]))
+        
+        portfolio_value = sum(pos.amount * prices.get(sym, 0) for sym, pos in positions.items() 
+                             if sym in prices and not np.isnan(prices[sym]))
         total_equity = cash + portfolio_value
+        
         if not trend_series.loc[current_dt]:
             equity_records.append({"date": current_dt.date(), "equity": total_equity})
             continue
+        
         mom_today = momentum.loc[current_dt]
         candidates = mom_today[mom_today > MOMENTUM_THRESHOLD].sort_values(ascending=False)
         desired_set = set(list(candidates.index[:MAX_POSITIONS]))
+        
         for sym in list(positions.keys()):
             if sym not in desired_set and sym in prices and not np.isnan(prices[sym]):
                 pos = positions[sym]
                 sell_value = pos.amount * prices[sym]
                 cash += sell_value
-                log_trade(int(current_dt.timestamp() * 1000), current_dt.isoformat(), sym, "SELL", pos.amount, prices[sym])
+                log_trade(int(current_dt.timestamp() * 1_000_000_000), current_dt.isoformat(),
+                         sym, "SELL", pos.amount, prices[sym])
                 positions.pop(sym)
-        portfolio_value = sum(pos.amount * prices.get(sym, 0) for sym, pos in positions.items() if sym in prices and not np.isnan(prices[sym]))
+        
+        portfolio_value = sum(pos.amount * prices.get(sym, 0) for sym, pos in positions.items()
+                             if sym in prices and not np.isnan(prices[sym]))
         total_equity = cash + portfolio_value
+        
         if not desired_set:
             equity_records.append({"date": current_dt.date(), "equity": total_equity})
             continue
+            
         target_value_per_position = total_equity / len(desired_set)
+        
         for sym in desired_set:
             if sym not in prices or np.isnan(prices[sym]) or prices[sym] <= 0:
                 continue
+                
             current_value = 0
             if sym in positions:
                 current_value = positions[sym].amount * prices[sym]
+            
             delta_value = target_value_per_position - current_value
+            
             if abs(delta_value) < 10:
                 continue
+            
             if delta_value > 0:
                 buy_value = min(delta_value, cash * 0.99)
                 if buy_value < 10:
                     continue
                 buy_amount = buy_value / prices[sym]
                 cash -= buy_value
+                
                 if sym in positions:
                     pos = positions[sym]
                     new_amount = pos.amount + buy_amount
@@ -185,31 +188,42 @@ def run_crypto():
                     positions[sym] = PositionState(sym, new_amount, new_cost)
                 else:
                     positions[sym] = PositionState(sym, buy_amount, buy_value)
-                log_trade(int(current_dt.timestamp() * 1000), current_dt.isoformat(), sym, "BUY", buy_amount, prices[sym])
+                
+                log_trade(int(current_dt.timestamp() * 1_000_000_000), current_dt.isoformat(),
+                         sym, "BUY", buy_amount, prices[sym])
+            
             elif delta_value < 0 and sym in positions:
                 pos = positions[sym]
                 sell_value = min(-delta_value, pos.amount * prices[sym])
                 sell_amount = sell_value / prices[sym]
+                
                 cash += sell_value
                 new_amount = pos.amount - sell_amount
                 new_cost = pos.cost_basis * (new_amount / pos.amount) if pos.amount > 0 else 0
+                
                 if new_amount < 0.0001:
                     positions.pop(sym)
                 else:
                     positions[sym] = PositionState(sym, new_amount, new_cost)
-                log_trade(int(current_dt.timestamp() * 1000), current_dt.isoformat(), sym, "SELL", sell_amount, prices[sym])
-        portfolio_value = sum(pos.amount * prices.get(sym, 0) for sym, pos in positions.items() if sym in prices and not np.isnan(prices[sym]))
+                
+                log_trade(int(current_dt.timestamp() * 1_000_000_000), current_dt.isoformat(),
+                         sym, "SELL", sell_amount, prices[sym])
+        
+        portfolio_value = sum(pos.amount * prices.get(sym, 0) for sym, pos in positions.items()
+                             if sym in prices and not np.isnan(prices[sym]))
         total_equity = cash + portfolio_value
         equity_records.append({"date": current_dt.date(), "equity": total_equity})
+    
     os.makedirs(RESULTS_DIR, exist_ok=True)
     eq_df = pd.DataFrame(equity_records)
     eq_df.to_csv(PAPER_EQUITY_FILE, index=False)
+    
     print(f"\n{'='*60}")
     print(f"נשמר: {PAPER_EQUITY_FILE}")
     if os.path.exists(PAPER_TRADES_FILE):
         trades_df = pd.read_csv(PAPER_TRADES_FILE)
         print(f"נשמר: {PAPER_TRADES_FILE}")
-        print(f"\nסטטיסטיקות:")
+        print(f"\nסטטיסטיקות US:")
         print(f"  טריידים: {len(trades_df)}")
         print(f"  Equity התחלתי: ${INITIAL_CAPITAL:,.2f}")
         print(f"  Equity סופי: ${total_equity:,.2f}")
@@ -220,17 +234,13 @@ def run_crypto():
         eq_df['dd'] = (eq_df['equity'] - eq_df['peak']) / eq_df['peak']
         max_dd = eq_df['dd'].min() * 100
         print(f"  Max Drawdown: {max_dd:.2f}%")
-    else:
-        print("\nלא נוצרו טריידים")
     print(f"{'='*60}")
 
 def main():
-    print("=== Multi-Asset Crypto Momentum Backtest (Binance Real, 1D, 100K) ===")
-    print(f"טווח: {START_DATE} עד {END_DATE}")
-    print(f"Universe: {CRYPTO_BENCHMARK} + {len(CRYPTO_ALT_SYMBOLS)} אלטים")
-    print(f"אסטרטגיה: MA{TREND_MA_WINDOW}, Mom{MOMENTUM_LOOKBACK}, Exit{EXIT_LOOKBACK}, Top{MAX_POSITIONS}\n")
-    run_crypto()
-    print("\n✅ Momentum Backtest הסתיים בהצלחה!")
+    print("=== US Momentum Paper Trading (2022-2025) ===")
+    print(f"Universe: SPY + {len(US_STOCKS)} מניות\n")
+    run_us_paper()
+    print("\n✅ הסתיים!")
 
 if __name__ == "__main__":
     main()

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # coding: utf-8
 """
-multi_asset_crypto.py
+multi_asset_crypto_paper.py
 Momentum Backtest 100% זהה לבקטסט - גרסה מתוקנת סופית
 """
 import os
@@ -24,8 +24,8 @@ EXIT_LOOKBACK = 10
 MOMENTUM_THRESHOLD = 0.10
 MAX_POSITIONS = 5
 RESULTS_DIR = "results_multi"
-PAPER_TRADES_FILE = os.path.join(RESULTS_DIR, "crypto_trades.csv")
-PAPER_EQUITY_FILE = os.path.join(RESULTS_DIR, "crypto_equity.csv")
+PAPER_TRADES_FILE = os.path.join(RESULTS_DIR, "crypto_paper_trades.csv")
+PAPER_EQUITY_FILE = os.path.join(RESULTS_DIR, "crypto_paper_equity.csv")
 
 @dataclass
 class PaperTradeLog:
@@ -114,7 +114,7 @@ def log_trade(timestamp, dt, symbol, side, amount, price):
     else:
         row_df.to_csv(PAPER_TRADES_FILE, mode="a", header=False, index=False)
 
-def run_crypto():
+def run_crypto_paper():
     print("מתחבר ל-Binance real...")
     exchange = init_binance_real()
     btc_df_raw, alt_data_raw = fetch_crypto_universe(exchange)
@@ -229,7 +229,7 @@ def main():
     print(f"טווח: {START_DATE} עד {END_DATE}")
     print(f"Universe: {CRYPTO_BENCHMARK} + {len(CRYPTO_ALT_SYMBOLS)} אלטים")
     print(f"אסטרטגיה: MA{TREND_MA_WINDOW}, Mom{MOMENTUM_LOOKBACK}, Exit{EXIT_LOOKBACK}, Top{MAX_POSITIONS}\n")
-    run_crypto()
+    run_crypto_paper()
     print("\n✅ Momentum Backtest הסתיים בהצלחה!")
 
 if __name__ == "__main__":

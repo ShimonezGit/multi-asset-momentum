@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual env
+venv/
+.venv/
+
+# OS
+.DS_Store
+
+# Logs
+*.log
+
+# Local data / results (נשאיר רק קבצים חשובים ידנית אם תרצה)
+results_multi/*.csv
+results_multi/*.md
+btc_5m_binance_clean.csv
+
+# Streamlit cache
+.streamlit/
