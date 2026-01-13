@@ -10,44 +10,34 @@ import streamlit as st
 
 RESULTS_DIR = "results_multi"
 
-CRYPTO_STRAT_FILE = os.path.join(RESULTS_DIR, "crypto_paper_equity.csv")
-US_STRAT_FILE = os.path.join(RESULTS_DIR, "us_paper_equity.csv")
-MULTI_ADAPTIVE_FILE = os.path.join(RESULTS_DIR, "multi_adaptive_paper_equity.csv")
-
-CRYPTO_BENCH_FILE = os.path.join(RESULTS_DIR, "crypto_equity_curve.csv")
-US_BENCH_FILE = os.path.join(RESULTS_DIR, "us_equity_curve.csv")
+# קבצי אסטרטגיה / בנצ'מרק קיימים בפועל
+CRYPTO_STRAT_FILE = os.path.join(RESULTS_DIR, "crypto_equity.csv")           # מה-backtest
+CRYPTO_BENCH_FILE = os.path.join(RESULTS_DIR, "crypto_equity_curve.csv")     # BTC Buy&Hold
+US_BENCH_FILE = os.path.join(RESULTS_DIR, "us_equity_curve.csv")             # US Benchmark
 
 INITIAL_CAPITAL = 100000.0
 
 
-def load_equity_csv(path: str) -> Optional[pd.DataFrame]:
+# ---------- עזר לטעינה/מדדים ----------
+
+def load_equity_csv(path: str, label: str) -> Optional[pd.DataFrame]:
     if not os.path.exists(path):
+        st.warning(f"{label}: file not found: {path}")
         return None
 
-    df = pd.read_csv(path)
+    try:
+        df = pd.read_csv(path)
+    except Exception as e:
+        st.error(f"{label}: failed to read CSV: {e}")
+        return None
 
     if "date" not in df.columns or "equity" not in df.columns:
+        st.error(f"{label}: CSV must have 'date' and 'equity' columns.")
         return None
 
     df["date"] = pd.to_datetime(df["date"])
     df["equity"] = df["equity"].astype(float)
     df = df.sort_values("date").reset_index(drop=True)
-    return df
-
-
-def align_raw(
-    strat_df: Optional[pd.DataFrame],
-    bench_df: Optional[pd.DataFrame],
-) -> Optional[pd.DataFrame]:
-    if strat_df is None or strat_df.empty:
-        return None
-
-    df = strat_df[["date", "equity"]].rename(columns={"equity": "Strategy_raw"})
-
-    if bench_df is not None and not bench_df.empty:
-        b = bench_df[["date", "equity"]].rename(columns={"equity": "Benchmark_raw"})
-        df = df.merge(b, on="date", how="inner")
-
     return df
 
 
@@ -65,7 +55,7 @@ def get_global_range(dfs: List[Optional[pd.DataFrame]]) -> Tuple[date, date]:
     return min(dates).date(), max(dates).date()
 
 
-def compute_metrics_from_series(equity_raw: pd.Series) -> Dict[str, float]:
+def compute_metrics(equity: pd.Series) -> Dict[str, float]:
     out: Dict[str, float] = {
         "total_return": np.nan,
         "multiple": np.nan,
@@ -73,14 +63,14 @@ def compute_metrics_from_series(equity_raw: pd.Series) -> Dict[str, float]:
         "sharpe": np.nan,
     }
 
-    if equity_raw is None or len(equity_raw) < 2:
+    if equity is None or len(equity) < 2:
         return out
 
-    eq = equity_raw.astype(float)
+    eq = equity.astype(float)
     start_val = float(eq.iloc[0])
     end_val = float(eq.iloc[-1])
 
-    if start_val == 0:
+    if start_val <= 0:
         return out
 
     total_ret = end_val / start_val - 1.0
@@ -98,113 +88,85 @@ def compute_metrics_from_series(equity_raw: pd.Series) -> Dict[str, float]:
     return out
 
 
-def normalize_series(equity_raw: pd.Series) -> pd.Series:
-    eq = equity_raw.astype(float)
+def normalize_equity(equity: pd.Series) -> pd.Series:
+    eq = equity.astype(float)
     start_val = float(eq.iloc[0])
-    if start_val == 0:
+    if start_val <= 0:
         return eq
     factor = INITIAL_CAPITAL / start_val
     return eq * factor
 
 
+# ---------- אפליקציה ----------
+
 def main() -> None:
-    st.set_page_config(page_title="Multi-Asset Investor Dashboard", layout="wide")
+    st.set_page_config(page_title="Crypto Momentum – Investor View", layout="wide")
 
-    crypto_strat = load_equity_csv(CRYPTO_STRAT_FILE)
-    us_strat = load_equity_csv(US_STRAT_FILE)
-    multi_adapt = load_equity_csv(MULTI_ADAPTIVE_FILE)
-
-    crypto_bench = load_equity_csv(CRYPTO_BENCH_FILE)
-    us_bench = load_equity_csv(US_BENCH_FILE)
-
-    crypto_merge = align_raw(crypto_strat, crypto_bench)
-    us_merge = align_raw(us_strat, us_bench)
-
-    gmin, gmax = get_global_range([crypto_merge, us_merge, multi_adapt])
-
-    st.title("Paper Trading – Investor View")
+    st.title("Crypto Momentum – Investor View")
     st.caption(
-        "Crypto Strategy, US Strategy, Multi-Adaptive (Crypto+US). "
-        "All results are from systematic paper trading on 5-minute bars."
+        "Momentum strategy on top-10 alts vs BTC Buy&Hold, 1D, 100K, Binance data."
     )
 
-    st.write(f"Full backtest range: {gmin} → {gmax}")
+    crypto_strat = load_equity_csv(CRYPTO_STRAT_FILE, "Crypto Strategy")
+    crypto_bench = load_equity_csv(CRYPTO_BENCH_FILE, "BTC Benchmark")
+    us_bench = load_equity_csv(US_BENCH_FILE, "US Benchmark")
+
+    gmin, gmax = get_global_range([crypto_strat, crypto_bench, us_bench])
+    st.write(f"Loaded date range: {gmin} → {gmax}")
     st.markdown("---")
 
     tab_overview, tab_equity, tab_details = st.tabs(
-        ["Overview", "Equity Curves", "Details"]
+        ["Overview", "Equity Curves", "Raw Data"]
     )
 
-    # ---------------- Overview ----------------
+    # ---------- Overview ----------
     with tab_overview:
-        st.subheader("High-Level Metrics")
+        st.subheader("Metrics")
 
         rows = []
 
-        if crypto_merge is not None and not crypto_merge.empty:
-            m_strat = compute_metrics_from_series(crypto_merge["Strategy_raw"])
-            m_bench = compute_metrics_from_series(crypto_merge["Benchmark_raw"])
+        if crypto_strat is not None and not crypto_strat.empty:
+            m = compute_metrics(crypto_strat["equity"])
             rows.append(
                 {
-                    "Segment": "Crypto Strategy",
+                    "Instrument": "Crypto Momentum Strategy",
                     "Type": "Strategy",
-                    "Total Return %": m_strat["total_return"],
-                    "Multiple (x)": m_strat["multiple"],
-                    "Max DD %": m_strat["max_dd"],
-                    "Sharpe": m_strat["sharpe"],
-                }
-            )
-            rows.append(
-                {
-                    "Segment": "Crypto Strategy",
-                    "Type": "BTC benchmark",
-                    "Total Return %": m_bench["total_return"],
-                    "Multiple (x)": m_bench["multiple"],
-                    "Max DD %": m_bench["max_dd"],
-                    "Sharpe": m_bench["sharpe"],
+                    "Total Return %": m["total_return"],
+                    "Multiple (x)": m["multiple"],
+                    "Max DD %": m["max_dd"],
+                    "Sharpe": m["sharpe"],
                 }
             )
 
-        if us_merge is not None and not us_merge.empty:
-            m_strat = compute_metrics_from_series(us_merge["Strategy_raw"])
-            m_bench = compute_metrics_from_series(us_merge["Benchmark_raw"])
+        if crypto_bench is not None and not crypto_bench.empty:
+            m = compute_metrics(crypto_bench["equity"])
             rows.append(
                 {
-                    "Segment": "US Strategy",
-                    "Type": "Strategy",
-                    "Total Return %": m_strat["total_return"],
-                    "Multiple (x)": m_strat["multiple"],
-                    "Max DD %": m_strat["max_dd"],
-                    "Sharpe": m_strat["sharpe"],
-                }
-            )
-            rows.append(
-                {
-                    "Segment": "US Strategy",
-                    "Type": "US benchmark",
-                    "Total Return %": m_bench["total_return"],
-                    "Multiple (x)": m_bench["multiple"],
-                    "Max DD %": m_bench["max_dd"],
-                    "Sharpe": m_bench["sharpe"],
+                    "Instrument": "BTC Benchmark",
+                    "Type": "Benchmark",
+                    "Total Return %": m["total_return"],
+                    "Multiple (x)": m["multiple"],
+                    "Max DD %": m["max_dd"],
+                    "Sharpe": m["sharpe"],
                 }
             )
 
-        if multi_adapt is not None and not multi_adapt.empty:
-            m_multi = compute_metrics_from_series(multi_adapt["equity"])
+        if us_bench is not None and not us_bench.empty:
+            m = compute_metrics(us_bench["equity"])
             rows.append(
                 {
-                    "Segment": "Multi-Adaptive (Crypto+US)",
-                    "Type": "Portfolio",
-                    "Total Return %": m_multi["total_return"],
-                    "Multiple (x)": m_multi["multiple"],
-                    "Max DD %": m_multi["max_dd"],
-                    "Sharpe": m_multi["sharpe"],
+                    "Instrument": "US Benchmark",
+                    "Type": "Benchmark",
+                    "Total Return %": m["total_return"],
+                    "Multiple (x)": m["multiple"],
+                    "Max DD %": m["max_dd"],
+                    "Sharpe": m["sharpe"],
                 }
             )
 
         if rows:
-            overview_df = pd.DataFrame(rows)
-            styled = overview_df.style.format(
+            df = pd.DataFrame(rows)
+            styled = df.style.format(
                 {
                     "Total Return %": "{:.1f}",
                     "Multiple (x)": "{:.2f}",
@@ -214,120 +176,92 @@ def main() -> None:
             )
             st.dataframe(styled, use_container_width=True)
         else:
-            st.warning("No data loaded for any strategy.")
+            st.warning("No data loaded for any instrument.")
 
-        st.markdown("---")
-        st.markdown(
-            "מטרת האסטרטגיות: לנצח את הבנצ'מרקים ברווחיות וב‑drawdown, "
-            "והמולטי‑אדפטיב לחבר אותם לתיק אחד."
-        )
-
-    # ---------------- Equity Curves ----------------
+    # ---------- Equity Curves ----------
     with tab_equity:
         st.subheader("Equity Curves – Normalized to 100,000")
 
-        merged_for_plot = pd.DataFrame()
+        merged = pd.DataFrame()
 
+        # ציר זמן – לפי האסטרטגיה אם קיימת, אחרת לפי BTC
         if crypto_strat is not None and not crypto_strat.empty:
-            merged_for_plot["date"] = crypto_strat["date"]
-        elif us_strat is not None and not us_strat.empty:
-            merged_for_plot["date"] = us_strat["date"]
-        elif multi_adapt is not None and not multi_adapt.empty:
-            merged_for_plot["date"] = multi_adapt["date"]
+            merged["date"] = crypto_strat["date"]
+        elif crypto_bench is not None and not crypto_bench.empty:
+            merged["date"] = crypto_bench["date"]
+        elif us_bench is not None and not us_bench.empty:
+            merged["date"] = us_bench["date"]
 
-        if merged_for_plot.empty:
-            st.info("No equity data to plot.")
+        if merged.empty:
+            st.info("No data to plot.")
         else:
             if crypto_strat is not None and not crypto_strat.empty:
-                crypto_norm = normalize_series(crypto_strat["equity"])
-                merged_for_plot = merged_for_plot.merge(
+                merged = merged.merge(
                     pd.DataFrame(
-                        {"date": crypto_strat["date"], "Crypto Strategy": crypto_norm}
+                        {
+                            "date": crypto_strat["date"],
+                            "Crypto Momentum Strategy": normalize_equity(
+                                crypto_strat["equity"]
+                            ),
+                        }
                     ),
                     on="date",
                     how="left",
                 )
 
             if crypto_bench is not None and not crypto_bench.empty:
-                bench_norm = normalize_series(crypto_bench["equity"])
-                merged_for_plot = merged_for_plot.merge(
+                merged = merged.merge(
                     pd.DataFrame(
-                        {"date": crypto_bench["date"], "BTC benchmark": bench_norm}
-                    ),
-                    on="date",
-                    how="left",
-                )
-
-            if us_strat is not None and not us_strat.empty:
-                us_norm = normalize_series(us_strat["equity"])
-                merged_for_plot = merged_for_plot.merge(
-                    pd.DataFrame(
-                        {"date": us_strat["date"], "US Strategy": us_norm}
+                        {
+                            "date": crypto_bench["date"],
+                            "BTC Benchmark": normalize_equity(
+                                crypto_bench["equity"]
+                            ),
+                        }
                     ),
                     on="date",
                     how="left",
                 )
 
             if us_bench is not None and not us_bench.empty:
-                us_bench_norm = normalize_series(us_bench["equity"])
-                merged_for_plot = merged_for_plot.merge(
+                merged = merged.merge(
                     pd.DataFrame(
-                        {"date": us_bench["date"], "US benchmark": us_bench_norm}
+                        {
+                            "date": us_bench["date"],
+                            "US Benchmark": normalize_equity(us_bench["equity"]),
+                        }
                     ),
                     on="date",
                     how="left",
                 )
 
-            if multi_adapt is not None and not multi_adapt.empty:
-                multi_norm = normalize_series(multi_adapt["equity"])
-                merged_for_plot = merged_for_plot.merge(
-                    pd.DataFrame(
-                        {"date": multi_adapt["date"], "Multi-Adaptive": multi_norm}
-                    ),
-                    on="date",
-                    how="left",
-                )
+            merged = merged.sort_values("date").set_index("date")
+            st.line_chart(merged, use_container_width=True, height=380)
 
-            merged_for_plot = merged_for_plot.sort_values("date").set_index("date")
-            st.line_chart(merged_for_plot, use_container_width=True, height=380)
-
-    # ---------------- Details ----------------
+    # ---------- Raw Data ----------
     with tab_details:
-        st.subheader("Raw Equity Data")
-
+        st.subheader("Raw Data")
         col1, col2 = st.columns(2)
 
         with col1:
-            st.markdown("#### Crypto Strategy – Paper Equity")
+            st.markdown("#### Crypto Momentum Strategy")
             if crypto_strat is not None and not crypto_strat.empty:
-                st.dataframe(crypto_strat, use_container_width=True, height=220)
+                st.dataframe(crypto_strat, use_container_width=True, height=300)
             else:
                 st.info("No crypto strategy equity file.")
 
-            st.markdown("#### US Strategy – Paper Equity")
-            if us_strat is not None and not us_strat.empty:
-                st.dataframe(us_strat, use_container_width=True, height=220)
+            st.markdown("#### BTC Benchmark")
+            if crypto_bench is not None and not crypto_bench.empty:
+                st.dataframe(crypto_bench, use_container_width=True, height=300)
             else:
-                st.info("No US strategy equity file.")
+                st.info("No BTC benchmark file.")
 
         with col2:
-            st.markdown("#### BTC Benchmark – Buy & Hold")
-            if crypto_bench is not None and not crypto_bench.empty:
-                st.dataframe(crypto_bench, use_container_width=True, height=220)
-            else:
-                st.info("No BTC benchmark equity file.")
-
-            st.markdown("#### US Benchmark – Buy & Hold")
+            st.markdown("#### US Benchmark")
             if us_bench is not None and not us_bench.empty:
-                st.dataframe(us_bench, use_container_width=True, height=220)
+                st.dataframe(us_bench, use_container_width=True, height=300)
             else:
-                st.info("No US benchmark equity file.")
-
-            st.markdown("#### Multi-Adaptive Portfolio – Equity")
-            if multi_adapt is not None and not multi_adapt.empty:
-                st.dataframe(multi_adapt, use_container_width=True, height=220)
-            else:
-                st.info("No multi-adaptive equity file.")
+                st.info("No US benchmark file.")
 
 
 if __name__ == "__main__":

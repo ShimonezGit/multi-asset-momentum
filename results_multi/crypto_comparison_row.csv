@@ -1,0 +1,2 @@
+asset_class,strategy_name,env,start_date,end_date,start_equity,end_equity,total_return_pct,max_drawdown_pct,num_trades,win_rate_pct,avg_win,avg_loss,total_pnl
+Crypto,Multi-Asset Crypto Core,Backtest,2022-04-10,2025-12-31,100000.0,1105704.346922453,1005.7043469224528,-45.41600093716831,3122,31.742472773862907,2733.101852774376,-3005.09199825449,1067723.7050524547

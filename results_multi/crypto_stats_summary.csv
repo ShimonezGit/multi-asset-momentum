@@ -1,0 +1,2 @@
+num_trades,num_wins,num_losses,win_rate_pct,avg_win,avg_loss,total_pnl,max_drawdown_pct,max_dd_date,max_dd_equity,start_date,end_date,start_equity,end_equity,total_return_pct
+3122,991,546,31.742472773862907,2733.101852774376,-3005.09199825449,1067723.705052455,-45.41600093716831,2024-10-25,264792.03768850566,2022-01-01,2025-12-31,100000.0,1105704.346922453,1005.7043469224529

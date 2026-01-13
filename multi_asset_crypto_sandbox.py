@@ -1,86 +1,42 @@
 #!/usr/bin/env python3
 # coding: utf-8
-
-"""
-multi_asset_crypto_sandbox.py
-
-Sandbox למסחר יומי בקריפטו (BTC + אלטים זמינים) על Binance Spot Testnet,
-עם לוגיקת מומנטום/טרנד זהה רעיונית לבקטסט multi_asset_momentum_backtest.py:
-- MA 100 כסינון טרנד
-- מומנטום 20 ימים
-- EXIT 10 ימים
-- TOP N נכסים לפי מומנטום
-- הקצאה שווה בין פוזיציות
-
-היוניברס נבנה דינמית לפי מה שקיים בפועל ב-Binance Spot Testnet
-(סימבולים שלא קיימים / ללא נתונים – נזרקים).
-
-טווח הנתונים: 60 ימים אחורה מהיום (UTC), טיימפריים יומי.
-"""
-
 import os
 import time
 from dataclasses import dataclass, asdict
 from datetime import datetime, timedelta
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, Optional
 
 import numpy as np
 import pandas as pd
 import ccxt
 
+LOOKBACK_DAYS = 30
+today_utc = datetime.now().date()
+start_dt = today_utc - timedelta(days=LOOKBACK_DAYS)
+end_dt = today_utc
 
-# ========================
-# קונפיגורציה בסיסית
-# ========================
-
-# טווח יחסי – 60 ימים אחורה מהיום (UTC)
-LOOKBACK_DAYS = 60
-_today_utc = datetime.utcnow().date()
-_start_dt = _today_utc - timedelta(days=LOOKBACK_DAYS)
-_end_dt = _today_utc
-
-START_DATE = _start_dt.strftime("%Y-%m-%d")
-END_DATE = _end_dt.strftime("%Y-%m-%d")
+START_DATE = start_dt.strftime("%Y-%m-%d")
+END_DATE = end_dt.strftime("%Y-%m-%d")
 TIMEFRAME_CRYPTO = "1d"
 
-INITIAL_CAPITAL = 100000.0
-
-# Benchmark
 CRYPTO_BENCHMARK = "BTC/USDT"
+CRYPTO_ALT_SYMBOLS = ["ETH/USDT", "SOL/USDT"]
 
-# רשימת אלטים רצויה – בפועל נסנן לפי מה שקיים במרקטים של הטסטנט
-CRYPTO_ALT_SYMBOLS_CANDIDATES = [
-    "ETH/USDT",
-    "BNB/USDT",
-    "SOL/USDT",
-    "XRP/USDT",
-    "ADA/USDT",
-    "AVAX/USDT",
-    "DOGE/USDT",
-    "LINK/USDT",
-    "MATIC/USDT",
-    "OP/USDT",
-]
-
-TREND_MA_WINDOW = 100
 MOMENTUM_LOOKBACK = 20
-EXIT_LOOKBACK = 10
-MOMENTUM_THRESHOLD = 0.10  # 10%
-MAX_POSITIONS = 5
+ENTRY_MOMENTUM_THRESHOLD = 0.02
+EXIT_MOMENTUM_THRESHOLD = -0.03
+MIN_HOLDING_DAYS = 3
+MAX_HOLDING_DAYS = 15
+MAX_POSITIONS = 2
+MAX_POSITION_SIZE_USDT = 1500.0
 
 RESULTS_DIR = "results_multi"
 SANDBOX_TRADES_FILE = os.path.join(RESULTS_DIR, "crypto_sandbox_trades.csv")
 SANDBOX_EQUITY_FILE = os.path.join(RESULTS_DIR, "crypto_sandbox_equity.csv")
 
-EXECUTE_ON_TESTNET = True
-
 BINANCE_TESTNET_API_KEY = os.getenv("BINANCE_TESTNET_API_KEY")
 BINANCE_TESTNET_SECRET_KEY = os.getenv("BINANCE_TESTNET_SECRET_KEY")
 
-
-# ========================
-# מבני נתונים
-# ========================
 
 @dataclass
 class SandboxTradeLog:
@@ -99,19 +55,16 @@ class PositionState:
     symbol: str
     amount: float
     entry_price: float
+    entry_date: datetime
 
 
-# ========================
-# יוטיליטי – Binance Testnet
-# ========================
+def init_binance_real():
+    return ccxt.binance({"enableRateLimit": True})
 
-def init_binance_testnet() -> ccxt.binance:
+
+def init_binance_testnet():
     if not BINANCE_TESTNET_API_KEY or not BINANCE_TESTNET_SECRET_KEY:
-        raise RuntimeError(
-            "חסר BINANCE_TESTNET_API_KEY או BINANCE_TESTNET_SECRET_KEY ב-env. "
-            "שים export לפני הרצה."
-        )
-
+        raise RuntimeError("חסר API keys")
     exchange = ccxt.binance({
         "apiKey": BINANCE_TESTNET_API_KEY,
         "secret": BINANCE_TESTNET_SECRET_KEY,
@@ -121,17 +74,19 @@ def init_binance_testnet() -> ccxt.binance:
     return exchange
 
 
-def fetch_ohlcv_for_symbol(
-    exchange: ccxt.binance,
-    symbol: str,
-    timeframe: str,
-    since_ms: int,
-    until_ms: int,
-) -> pd.DataFrame:
-    all_data: List[List[float]] = []
+def fetch_testnet_usdt(exchange):
+    try:
+        balance = exchange.fetch_balance()
+        return float(balance["free"].get("USDT", 0.0))
+    except Exception as e:
+        print(f"שגיאה בקריאת balance: {e}")
+        return 0.0
+
+
+def fetch_ohlcv_for_symbol(exchange, symbol, timeframe, since_ms, until_ms):
+    all_data = []
     limit = 1000
     since = since_ms
-
     while True:
         ohlcv = exchange.fetch_ohlcv(symbol, timeframe=timeframe, since=since, limit=limit)
         if not ohlcv:
@@ -142,357 +97,213 @@ def fetch_ohlcv_for_symbol(
             break
         since = last_ts + 1
         time.sleep(exchange.rateLimit / 1000.0)
-
     if not all_data:
         return pd.DataFrame()
-
-    df = pd.DataFrame(
-        all_data,
-        columns=["timestamp", "open", "high", "low", "close", "volume"],
-    )
+    df = pd.DataFrame(all_data, columns=["timestamp", "open", "high", "low", "close", "volume"])
     df["datetime"] = pd.to_datetime(df["timestamp"], unit="ms")
     df.set_index("datetime", inplace=True)
     df = df.sort_index()
     df = df[(df.index >= START_DATE) & (df.index <= END_DATE)]
-    return df[["open", "high", "low", "close", "volume"]].copy()
+    return df[["close", "volume"]].copy()
 
 
-def fetch_crypto_universe(
-    exchange: ccxt.binance,
-) -> Tuple[pd.DataFrame, Dict[str, pd.DataFrame]]:
-    """
-    בונה Universe קריפטו דינמי לפי מה שקיים ב-Binance Spot Testnet:
-    - BTC/USDT (חובה)
-    - כל אלט מ-CRYPTO_ALT_SYMBOLS_CANDIDATES שקיים ב-exchange.markets
-      ויש לו נתוני OHLCV בטווח.
-    """
-    print("טוען רשימת מרקטים מה-Binance Spot Testnet...")
+def fetch_crypto_universe(exchange):
     markets = exchange.load_markets()
-    available_symbols = set(markets.keys())
-
-    if CRYPTO_BENCHMARK not in available_symbols:
-        raise RuntimeError(f"Benchmark {CRYPTO_BENCHMARK} לא קיים ב-Testnet markets.")
-
+    available = set(markets.keys())
     start_ms = int(pd.Timestamp(START_DATE).timestamp() * 1000)
     end_ms = int(pd.Timestamp(END_DATE).timestamp() * 1000)
-
-    print(f"מוריד נתוני BTC/Benchmark מה-API לטווח {START_DATE} עד {END_DATE}...")
-    btc_df = fetch_ohlcv_for_symbol(
-        exchange, CRYPTO_BENCHMARK, TIMEFRAME_CRYPTO, start_ms, end_ms
-    )
-    if btc_df.empty:
-        raise RuntimeError("לא נמצאו נתוני OHLCV עבור BTC/USDT בטווח המבוקש.")
-
-    alt_data: Dict[str, pd.DataFrame] = {}
-
-    for alt in CRYPTO_ALT_SYMBOLS_CANDIDATES:
-        if alt not in available_symbols:
-            print(f"{alt} – לא קיים במרקטים של הטסטנט. מדלג.")
+    
+    universe = {}
+    for sym in [CRYPTO_BENCHMARK] + CRYPTO_ALT_SYMBOLS:
+        if sym not in available:
             continue
-        print(f"מוריד נתונים עבור {alt} לטווח {START_DATE} עד {END_DATE}...")
-        df = fetch_ohlcv_for_symbol(
-            exchange, alt, TIMEFRAME_CRYPTO, start_ms, end_ms
-        )
+        print(f"מוריד {sym}...")
+        df = fetch_ohlcv_for_symbol(exchange, sym, TIMEFRAME_CRYPTO, start_ms, end_ms)
         if df.empty:
-            print(f"{alt} – אין נתוני OHLCV בטווח. מדלג.")
             continue
-        alt_data[alt] = df
-
-    if not alt_data:
-        print("אזהרה: לא נמצאו אלטים עם נתונים. הסנדבוקס יעבוד רק על BTC/USDT.")
-
-    return btc_df, alt_data
-
-
-# ========================
-# אינדיקטורים ואסטרטגיה
-# ========================
-
-def add_trend_and_momentum(df: pd.DataFrame) -> pd.DataFrame:
-    out = df.copy()
-    out["ma_trend"] = out["close"].rolling(TREND_MA_WINDOW).mean()
-    out["trend_up"] = out["close"] > out["ma_trend"]
-    out["ret_1d"] = out["close"].pct_change()
-    out["ret_mom"] = out["close"].pct_change(MOMENTUM_LOOKBACK)
-    out["ret_exit"] = out["close"].pct_change(EXIT_LOOKBACK)
-    return out
+        df["ret_mom"] = df["close"].pct_change(MOMENTUM_LOOKBACK)
+        universe[sym] = df
+    
+    if CRYPTO_BENCHMARK not in universe:
+        raise RuntimeError("אין BTC/USDT")
+    return universe
 
 
-def build_calendar(
-    benchmark_df: pd.DataFrame,
-    alt_data: Dict[str, pd.DataFrame],
-) -> pd.DatetimeIndex:
-    idx = benchmark_df.index
-    for df in alt_data.values():
+def build_calendar(universe):
+    idx = pd.DatetimeIndex([])
+    for df in universe.values():
         idx = idx.union(df.index)
-    idx = idx.sort_values()
-    idx = idx[(idx >= START_DATE) & (idx <= END_DATE)]
-    return idx
+    return idx.sort_values()
 
 
-def build_matrix(
-    calendar: pd.DatetimeIndex,
-    data: Dict[str, pd.DataFrame],
-    col: str,
-) -> pd.DataFrame:
-    series_map = {}
-    for sym, df in data.items():
-        if col not in df.columns:
-            continue
-        ser = df[col].reindex(calendar).ffill()
-        series_map[sym] = ser
-    return pd.DataFrame(series_map, index=calendar)
+def build_matrix(calendar, universe, col):
+    data = {}
+    for sym, df in universe.items():
+        if col in df.columns:
+            data[sym] = df[col].reindex(calendar).ffill()
+    return pd.DataFrame(data, index=calendar)
 
 
-# ========================
-# ביצוע – Binance Orders
-# ========================
-
-def place_market_order(
-    exchange: ccxt.binance,
-    symbol: str,
-    side: str,
-    amount: float,
-) -> Optional[SandboxTradeLog]:
+def place_market_order(exchange, symbol, side, amount):
     if amount <= 0:
         return None
-
-    if not EXECUTE_ON_TESTNET:
-        now_ms = int(time.time() * 1000)
-        dt = pd.to_datetime(now_ms, unit="ms").isoformat()
-        return SandboxTradeLog(
-            timestamp=now_ms,
-            datetime=dt,
-            symbol=symbol,
-            side=side.upper(),
-            amount=amount,
-            price=0.0,
-            cost=0.0,
-            info_id="SIMULATED",
-        )
-
     try:
         binance_symbol = symbol.replace("/", "")
-        order = exchange.create_order(
-            symbol=binance_symbol,
-            type="market",
-            side=side,
-            amount=amount,
-        )
+        order = exchange.create_order(symbol=binance_symbol, type="market", side=side, amount=amount)
         ts = int(order.get("timestamp") or int(time.time() * 1000))
         dt = exchange.iso8601(ts)
         price = float(order.get("price") or 0.0)
         if price == 0.0:
-            fills = (
-                order.get("info", {}).get("fills")
-                or order.get("fills")
-                or []
-            )
+            fills = order.get("info", {}).get("fills") or order.get("fills") or []
             if fills:
                 price = float(fills[0].get("price") or 0.0)
         cost = float(order.get("cost") or (price * amount))
-        return SandboxTradeLog(
-            timestamp=ts,
-            datetime=dt,
-            symbol=symbol,
-            side=side.upper(),
-            amount=amount,
-            price=price,
-            cost=cost,
-            info_id=str(order.get("id")),
-        )
+        return SandboxTradeLog(ts, dt, symbol, side.upper(), amount, price, cost, str(order.get("id")))
     except Exception as e:
-        print(f"שגיאה בביצוע order עבור {symbol}: {e}")
+        print(f"שגיאה order {symbol}: {e}")
         return None
 
 
-def append_trade_log(log: SandboxTradeLog) -> None:
+def append_trade_log(log_entry):
+    if not log_entry:
+        return
     os.makedirs(RESULTS_DIR, exist_ok=True)
-    row_df = pd.DataFrame([asdict(log)])
+    row = pd.DataFrame([asdict(log_entry)])
     if not os.path.exists(SANDBOX_TRADES_FILE):
-        row_df.to_csv(SANDBOX_TRADES_FILE, index=False)
+        row.to_csv(SANDBOX_TRADES_FILE, index=False)
     else:
-        row_df.to_csv(SANDBOX_TRADES_FILE, mode="a", header=False, index=False)
+        row.to_csv(SANDBOX_TRADES_FILE, mode="a", header=False, index=False)
 
 
-# ========================
-# לוגיקת Sandbox – ניהול תיק
-# ========================
+def should_exit_position(pos: PositionState, current_dt, momentum: float) -> bool:
+    days_held = (current_dt.date() - pos.entry_date.date()).days
+    
+    # יציאה חובה אם מומנטום שלילי חזק
+    if momentum < EXIT_MOMENTUM_THRESHOLD:
+        return True
+    
+    # יציאה אחרי holding period מקסימלי
+    if days_held >= MAX_HOLDING_DAYS:
+        return True
+    
+    # לא לצאת לפני holding period מינימלי אלא אם כן הפסד גדול
+    if days_held < MIN_HOLDING_DAYS:
+        return False
+    
+    # יציאה אם מומנטום הפך שלילי אחרי holding מינימלי
+    if momentum < 0:
+        return True
+    
+    return False
 
-def run_crypto_sandbox() -> None:
-    print("מתחבר ל-Binance Spot Testnet...")
-    exchange = init_binance_testnet()
 
-    print("מוריד Universe קריפטו (דינמי לפי מרקטים קיימים)...")
-    btc_df_raw, alt_data_raw = fetch_crypto_universe(exchange)
-
-    btc_df = add_trend_and_momentum(btc_df_raw)
-    alt_data: Dict[str, pd.DataFrame] = {}
-    for sym, df in alt_data_raw.items():
-        alt_data[sym] = add_trend_and_momentum(df)
-
-    universe_data: Dict[str, pd.DataFrame] = {CRYPTO_BENCHMARK: btc_df, **alt_data}
-    calendar = build_calendar(btc_df, alt_data)
-    closes = build_matrix(calendar, universe_data, "close")
-    momentum = build_matrix(calendar, universe_data, "ret_mom")
-    exit_ret = build_matrix(calendar, universe_data, "ret_exit")
-
-    trend_series = btc_df["trend_up"].reindex(calendar).ffill().fillna(False)
-
-    equity = INITIAL_CAPITAL
+def run_crypto_sandbox():
+    print("=== Crypto Sandbox ===")
+    print(f"טווח: {START_DATE} -> {END_DATE}")
+    print(f"פרמטרים: Entry>{ENTRY_MOMENTUM_THRESHOLD}, Exit<{EXIT_MOMENTUM_THRESHOLD}, Hold {MIN_HOLDING_DAYS}-{MAX_HOLDING_DAYS} days")
+    
+    exchange_data = init_binance_real()
+    exchange_exec = init_binance_testnet()
+    
+    universe = fetch_crypto_universe(exchange_data)
+    calendar = build_calendar(universe)
+    closes = build_matrix(calendar, universe, "close")
+    momentum = build_matrix(calendar, universe, "ret_mom")
+    
     positions: Dict[str, PositionState] = {}
-    equity_records: List[Dict[str, float]] = []
-
-    print("מתחיל לולאת ימים (Sandbox על טווח יחסי)...")
-    for current_dt in calendar:
-        prices_today = closes.loc[current_dt]
-
-        # יציאות לפי EXIT
+    equity_records = []
+    
+    initial_usdt = fetch_testnet_usdt(exchange_exec)
+    print(f"יתרת USDT התחלתית: {initial_usdt:.2f}")
+    
+    print(f"מתחיל לולאה על {len(calendar)} ימים...")
+    for i, current_dt in enumerate(calendar):
+        if i % 5 == 0:
+            print(f"  יום {i+1}/{len(calendar)}: {current_dt.date()}")
+        
+        prices = closes.loc[current_dt]
+        
+        # בדיקת יציאות - רק לפי קריטריונים חכמים
         for sym in list(positions.keys()):
             pos = positions[sym]
-            price = prices_today.get(sym, np.nan)
-            if np.isnan(price) or pos.amount <= 0:
+            price = prices.get(sym, np.nan)
+            if np.isnan(price):
                 continue
-            sym_exit = exit_ret.get(sym, pd.Series(dtype=float)).get(current_dt, 0.0)
-            if sym_exit <= 0.0:
-                side = "sell"
-                amount = pos.amount
-                trade_log = place_market_order(exchange, sym, side, amount)
-                if trade_log:
-                    append_trade_log(trade_log)
-                    equity += (trade_log.price - pos.entry_price) * trade_log.amount
-                positions.pop(sym, None)
-
-        portfolio_value = 0.0
-        for sym, pos in positions.items():
-            price = prices_today.get(sym, np.nan)
-            if np.isnan(price) or pos.amount <= 0:
-                continue
-            portfolio_value += pos.amount * price
-        total_equity = equity + portfolio_value
-
-        # ללא טרנד למעלה – לא פותחים פוזיציות חדשות
-        if not trend_series.loc[current_dt]:
-            equity_records.append(
-                {"date": current_dt.date(), "equity": float(total_equity)}
-            )
-            continue
-
-        # בחירת נכסים לפי מומנטום
-        mom_today = momentum.loc[current_dt]
-        candidates = mom_today[mom_today > MOMENTUM_THRESHOLD].sort_values(ascending=False)
-        selected = list(candidates.index[:MAX_POSITIONS])
-        desired_set = set(selected)
-
-        # סגירת נכסים שאינם רצויים (שלא נסגרו ב-EXIT)
-        for sym in list(positions.keys()):
-            if sym not in desired_set:
-                pos = positions[sym]
-                price = prices_today.get(sym, np.nan)
-                if np.isnan(price) or pos.amount <= 0:
+            
+            current_momentum = momentum.loc[current_dt].get(sym, 0.0)
+            
+            if should_exit_position(pos, current_dt, current_momentum):
+                days_held = (current_dt.date() - pos.entry_date.date()).days
+                print(f"    EXIT {sym} אחרי {days_held} ימים, momentum={current_momentum:.3f}")
+                log = place_market_order(exchange_exec, sym, "sell", pos.amount)
+                if log:
+                    append_trade_log(log)
+                    positions.pop(sym, None)
+        
+        # בדיקת כניסות - רק אם יש מקום
+        if len(positions) < MAX_POSITIONS:
+            mom = momentum.loc[current_dt]
+            candidates = mom[mom > ENTRY_MOMENTUM_THRESHOLD].sort_values(ascending=False)
+            
+            for sym in candidates.index:
+                if sym in positions:
                     continue
-                side = "sell"
-                amount = pos.amount
-                trade_log = place_market_order(exchange, sym, side, amount)
-                if trade_log:
-                    append_trade_log(trade_log)
-                    equity += (trade_log.price - pos.entry_price) * trade_log.amount
-                positions.pop(sym, None)
-
-        # חישוב מחדש של ערך התיק אחרי סגירות
-        portfolio_value = 0.0
-        for sym, pos in positions.items():
-            price = prices_today.get(sym, np.nan)
-            if np.isnan(price) or pos.amount <= 0:
-                continue
-            portfolio_value += pos.amount * price
-        total_equity = equity + portfolio_value
-
-        if len(desired_set) > 0:
-            capital_per_position = total_equity / float(len(desired_set))
-        else:
-            capital_per_position = 0.0
-
-        # פתיחה / Rebalance
-        for sym in desired_set:
-            price = prices_today.get(sym, np.nan)
-            if np.isnan(price) or price <= 0:
-                continue
-
-            current_amount = positions.get(sym, PositionState(sym, 0.0, 0.0)).amount
-            target_amount = capital_per_position / price
-            delta_amount = target_amount - current_amount
-
-            if abs(delta_amount * price) < 1.0:
-                continue
-
-            if delta_amount > 0:
-                side = "buy"
-                amount = delta_amount
-                cost_est = amount * price
-                if cost_est > equity:
+                if len(positions) >= MAX_POSITIONS:
+                    break
+                
+                price = prices.get(sym, np.nan)
+                if np.isnan(price) or price <= 0:
                     continue
-                trade_log = place_market_order(exchange, sym, side, amount)
-                if trade_log:
-                    append_trade_log(trade_log)
-                    equity -= trade_log.price * trade_log.amount
-                    new_amount = current_amount + trade_log.amount
-                    if current_amount <= 0:
-                        new_entry = trade_log.price
-                    else:
-                        old_value = current_amount * positions[sym].entry_price
-                        new_value = old_value + trade_log.price * trade_log.amount
-                        new_entry = new_value / new_amount
-                    positions[sym] = PositionState(sym, new_amount, new_entry)
-
-            elif delta_amount < 0:
-                side = "sell"
-                amount = -delta_amount
-                if sym not in positions or positions[sym].amount <= 0:
+                
+                # חישוב כמה USDT יש זמין
+                current_usdt = fetch_testnet_usdt(exchange_exec)
+                
+                # גודל פוזיציה: מינימום בין MAX_POSITION_SIZE לבין 40% מהיתרה
+                position_size_usdt = min(MAX_POSITION_SIZE_USDT, current_usdt * 0.4)
+                
+                if position_size_usdt < 100:
                     continue
-                if amount > positions[sym].amount:
-                    amount = positions[sym].amount
-                trade_log = place_market_order(exchange, sym, side, amount)
-                if trade_log:
-                    append_trade_log(trade_log)
-                    pos = positions[sym]
-                    equity += (trade_log.price - pos.entry_price) * trade_log.amount
-                    new_amount = pos.amount - trade_log.amount
-                    if new_amount <= 0:
-                        positions.pop(sym, None)
-                    else:
-                        positions[sym] = PositionState(sym, new_amount, pos.entry_price)
-
-        # עדכון Equity ליום
-        portfolio_value = 0.0
-        for sym, pos in positions.items():
-            price = prices_today.get(sym, np.nan)
-            if np.isnan(price) or pos.amount <= 0:
-                continue
-            portfolio_value += pos.amount * price
-        total_equity = equity + portfolio_value
-
-        equity_records.append(
-            {"date": current_dt.date(), "equity": float(total_equity)}
+                
+                amount = position_size_usdt / price
+                
+                print(f"    ENTER {sym}, momentum={mom[sym]:.3f}, size={position_size_usdt:.0f} USDT")
+                log = place_market_order(exchange_exec, sym, "buy", amount)
+                if log:
+                    append_trade_log(log)
+                    positions[sym] = PositionState(sym, log.amount, log.price, current_dt)
+        
+        # חישוב equity
+        current_usdt = fetch_testnet_usdt(exchange_exec)
+        portfolio_val = sum(
+            pos.amount * prices.get(sym, 0.0)
+            for sym, pos in positions.items()
         )
-
+        equity = current_usdt + portfolio_val
+        equity_records.append({"date": current_dt.date(), "equity": equity, "cash": current_usdt, "positions": portfolio_val})
+    
+    # סיכום
     os.makedirs(RESULTS_DIR, exist_ok=True)
     eq_df = pd.DataFrame(equity_records)
     eq_df.to_csv(SANDBOX_EQUITY_FILE, index=False)
-    print(f"נשמר קובץ עקומת הון של הסנדבוקס: {SANDBOX_EQUITY_FILE}")
-    print(f"נשמר קובץ טריידים: {SANDBOX_TRADES_FILE}")
+    
+    print("\n=== סיכום ===")
+    print(f"✅ {SANDBOX_EQUITY_FILE}")
+    if os.path.exists(SANDBOX_TRADES_FILE):
+        trades_df = pd.read_csv(SANDBOX_TRADES_FILE)
+        num_trades = len(trades_df)
+        print(f"✅ {SANDBOX_TRADES_FILE} ({num_trades} עסקאות)")
+    else:
+        print("⚠️ אין טריידים")
+    
+    final_equity = eq_df["equity"].iloc[-1]
+    total_return = (final_equity - initial_usdt) / initial_usdt * 100
+    print(f"הון התחלתי: {initial_usdt:.2f} USDT")
+    print(f"הון סופי: {final_equity:.2f} USDT")
+    print(f"תשואה: {total_return:.2f}%")
 
 
-# ========================
-# main
-# ========================
-
-def main() -> None:
-    print("=== Multi-Asset Crypto Sandbox (Binance Spot Testnet, 1D, 100K) ===")
-    print(f"EXECUTE_ON_TESTNET = {EXECUTE_ON_TESTNET}")
-    print(f"טווח נתונים: {START_DATE} עד {END_DATE} (UTC)")
+def main():
     run_crypto_sandbox()
-    print("הסנדבוקס הסתיים. בדוק את קבצי ה-CSV בתיקיית results_multi.")
 
 
 if __name__ == "__main__":
